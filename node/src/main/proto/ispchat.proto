@@ -1,0 +1,94 @@
+syntax = "proto3";
+
+package br.dev.ispchat.grpc;
+
+option java_multiple_files = true;
+option java_package = "br.dev.ispchat.grpc";
+option java_outer_classname = "IspChatProto";
+
+// Tipos de mensagens trafegadas na rede
+enum MessageType {
+  UNKNOWN = 0;
+  TEXT = 1;         // Mensagem de texto criptografada E2E
+  RING = 2;         // Notificação de chamada telefônica
+  SDP_OFFER = 3;    // Sinalização WebRTC (Metadados E2E)
+  SDP_ANSWER = 4;   // Sinalização WebRTC (Metadados E2E)
+  ICE_CANDIDATE = 5;// Estabelecimento de rotas NAT WebRTC
+}
+
+// ---------------------------------------------------------
+// 1. DhtService (Gerenciamento de Presença Kademlia)
+// ---------------------------------------------------------
+service DhtService {
+  // App notifica o Nó: "Estou online. Diga para a rede (DHT) me encontrar neste Nó"
+  rpc RegisterSession (RegisterSessionRequest) returns (RegisterSessionResponse);
+  
+  // Consulta a DHT para saber em quais Nós o usuário destino está logado
+  rpc FindUserSessions (FindUserSessionsRequest) returns (FindUserSessionsResponse);
+}
+
+message RegisterSessionRequest {
+  string user_uuid = 1;        // Identidade: UUIDv7 do cliente
+  string node_address = 2;     // IP/Hostname do nó host (a porta será sempre 443 mTLS)
+  bytes public_key = 3;        // Chave pública para validação da assinatura
+  bytes signature = 4;         // Assinatura digital protegendo o registro
+  int64 timestamp = 5;         // Proteção contra replay attack
+}
+
+message RegisterSessionResponse {
+  bool success = 1;
+}
+
+message FindUserSessionsRequest {
+  string target_uuid = 1;      // UUIDv7 buscado
+}
+
+message FindUserSessionsResponse {
+  repeated string node_addresses = 1; // Ex: ["node-sp.isp.com", "node-rj.isp.com"] (Porta sempre 443)
+}
+
+// ---------------------------------------------------------
+// 2. NodeRoutingService (Comunicação Nó-a-Nó via mTLS)
+// ---------------------------------------------------------
+service NodeRoutingService {
+  // Roteador de pacotes entre Provedores. Totalmente "cego" ao payload.
+  rpc RoutePayload (RoutePayloadRequest) returns (RoutePayloadResponse);
+}
+
+message RoutePayloadRequest {
+  string message_id = 1;       // UUIDv7 da mensagem
+  string sender_uuid = 2;      // UUIDv7 (Remetente)
+  string receiver_uuid = 3;    // UUIDv7 (Destinatário)
+  MessageType type = 4;
+  bytes encrypted_payload = 5; // Carga opaca criptografada com a chave do destinatário
+  int64 timestamp = 6;
+}
+
+message RoutePayloadResponse {
+  bool delivered = 1;          // True = Entregue ou armazenado na Redis List
+}
+
+// ---------------------------------------------------------
+// 3. ClientStreamService (Comunicação Flutter <-> Nó Local)
+// ---------------------------------------------------------
+service ClientStreamService {
+  // Stream bidirecional persistente.
+  // Flutter envia 'ClientEnvelope' e Nó entrega 'ServerEnvelope'.
+  rpc Connect (stream ClientEnvelope) returns (stream ServerEnvelope);
+}
+
+message ClientEnvelope {
+  string message_id = 1;       // UUIDv7
+  string receiver_uuid = 2;    // UUIDv7 do destinatário
+  MessageType type = 3;
+  bytes encrypted_payload = 4;
+  bytes signature = 5;         // Garante que o App local é quem diz ser
+}
+
+message ServerEnvelope {
+  string message_id = 1;       // UUIDv7
+  string sender_uuid = 2;      // UUIDv7
+  MessageType type = 3;
+  bytes encrypted_payload = 4;
+  int64 timestamp = 5;
+}
