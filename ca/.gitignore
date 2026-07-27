@@ -1,0 +1,6 @@
+# Ignore private keys, certs and CSRs to prevent leaks
+*.key
+*.crt
+*.csr
+*.srl
+*.pem
