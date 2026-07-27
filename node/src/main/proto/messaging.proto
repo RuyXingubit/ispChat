@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package br.dev.ispchat.messaging;
+option java_multiple_files = true;
+option java_package = "br.dev.ispchat.node.grpc.messaging";
+
+// Service responsible for delivering End-to-End Encrypted text messages and WebRTC signaling.
+service MessagingService {
+  
+  // Delivers an encrypted text message to the destination node.
+  // The node will either forward it instantly or store it in Redis if the user is offline.
+  rpc DeliverMessage (MessageRequest) returns (MessageResponse);
+
+  // Signals a WebRTC call (SDP offer/answer or ICE candidates)
+  rpc SignalCall (SignalingRequest) returns (SignalingResponse);
+}
+
+message MessageRequest {
+  // The UUIDv7 of the recipient
+  string recipient_uuid = 1;
+  // The UUIDv7 of the sender
+  string sender_uuid = 2;
+  // The E2E Encrypted Payload (The node cannot read this)
+  bytes encrypted_payload = 3;
+  // Cryptographic signature of the payload to guarantee sender authenticity
+  bytes signature = 4;
+  // Unique message ID to prevent duplicates
+  string message_id = 5;
+  // Timestamp
+  int64 timestamp = 6;
+}
+
+message MessageResponse {
+  // True if delivered to device OR safely stored in Redis queue
+  bool accepted = 1;
+}
+
+message SignalingRequest {
+  string recipient_uuid = 1;
+  string sender_uuid = 2;
+  // ENUM for signaling type
+  enum SignalType {
+    OFFER = 0;
+    ANSWER = 1;
+    ICE_CANDIDATE = 2;
+    RING = 3;
+    DECLINE = 4;
+  }
+  SignalType type = 3;
+  // The WebRTC SDP or ICE Candidate payload (Should also be encrypted to prevent metadata leakage)
+  bytes encrypted_signal_data = 4;
+}
+
+message SignalingResponse {
+  bool delivered = 1;
+  // If false, the recipient might be offline or blocked the sender
+  string error_message = 2;
+}
