@@ -1,0 +1,27 @@
+# Caddyfile para Proxy Reverso do PowerDNS e PowerDNS-Admin
+# --------------------------------------------------------
+# ATENÇÃO: Substitua os IPs "192.0.2.1" e "192.0.2.2" pelos SEUS 
+# IPs reais ANTES de subir o Docker.
+# Isso garante que a API e o painel de administração só possam
+# ser acessados pelas máquinas permitidas, protegendo a sua VPS.
+# --------------------------------------------------------
+
+dns-admin.ispchat.dev.br {
+    @allowed remote_ip 192.0.2.1 192.0.2.2
+    handle @allowed {
+        reverse_proxy pdns-admin:80
+    }
+    handle {
+        respond "Access Denied" 403
+    }
+}
+
+dns-api.ispchat.dev.br {
+    @allowed remote_ip 192.0.2.1 192.0.2.2
+    handle @allowed {
+        reverse_proxy pdns:8081
+    }
+    handle {
+        respond "Access Denied" 403
+    }
+}

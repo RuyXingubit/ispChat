@@ -1,0 +1,2 @@
+CREATE DATABASE pdnsadmin;
+GRANT ALL PRIVILEGES ON DATABASE pdnsadmin TO pdns_user;

@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: pdns-db
+    restart: always
+    environment:
+      POSTGRES_USER: ${PDNS_DB_USER:-pdns_user}
+      POSTGRES_PASSWORD: ${PDNS_DB_PASSWORD}
+      POSTGRES_DB: pdns
+    volumes:
+      - pdns-db-data:/var/lib/postgresql/data
+      - ./01-create-dbs.sql:/docker-entrypoint-initdb.d/01-create-dbs.sql:ro
+      - ./02-pdns-schema.sql:/docker-entrypoint-initdb.d/02-pdns-schema.sql:ro
+    networks:
+      - pdns-net
+
+  pdns:
+    image: powerdns/pdns-auth-48:latest
+    container_name: pdns-auth
+    restart: always
+    depends_on:
+      - db
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    volumes:
+      - ./pdns.conf:/etc/powerdns/pdns.conf:ro
+    environment:
+      - PDNS_gpgsql_user=${PDNS_DB_USER:-pdns_user}
+      - PDNS_gpgsql_password=${PDNS_DB_PASSWORD}
+      - PDNS_api_key=${PDNS_API_KEY}
+    networks:
+      - pdns-net
+
+  pdns-admin:
+    image: powerdnsadmin/pda-legacy:latest
+    container_name: pdns-admin
+    restart: always
+    depends_on:
+      - db
+      - pdns
+    environment:
+      - SQLA_DB_USER=${PDNS_DB_USER:-pdns_user}
+      - SQLA_DB_PASSWORD=${PDNS_DB_PASSWORD}
+      - SQLA_DB_HOST=db
+      - SQLA_DB_NAME=pdnsadmin
+      - GUNICORN_TIMEOUT=60
+      - GUNICORN_WORKERS=2
+      - GUNICORN_LOGLEVEL=INFO
+      - SECRET_KEY=${PDNS_ADMIN_SECRET_KEY}
+    networks:
+      - pdns-net
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: pdns-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - pdns-net
+
+volumes:
+  pdns-db-data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  pdns-net:
+    driver: bridge
