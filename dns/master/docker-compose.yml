@@ -31,6 +31,9 @@ services:
       - PDNS_gpgsql_user=${PDNS_DB_USER:-pdns_user}
       - PDNS_gpgsql_password=${PDNS_DB_PASSWORD}
       - PDNS_api_key=${PDNS_API_KEY}
+      - PDNS_master=yes
+      - PDNS_allow_axfr_ips=${SLAVE_IPS:-127.0.0.1}
+      - PDNS_also_notify=${SLAVE_IPS:-127.0.0.1}
     networks:
       - pdns-net
 

@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: pdns-slave-db
+    restart: always
+    environment:
+      POSTGRES_USER: ${PDNS_DB_USER:-pdns_user}
+      POSTGRES_PASSWORD: ${PDNS_DB_PASSWORD}
+      POSTGRES_DB: pdns
+    volumes:
+      - pdns-slave-db-data:/var/lib/postgresql/data
+      # Reaproveitando os mesmos schemas do master
+      - ../master/01-create-dbs.sql:/docker-entrypoint-initdb.d/01-create-dbs.sql:ro
+      - ../master/02-pdns-schema.sql:/docker-entrypoint-initdb.d/02-pdns-schema.sql:ro
+    networks:
+      - pdns-net
+
+  pdns-slave:
+    image: powerdns/pdns-auth-48:latest
+    container_name: pdns-slave
+    restart: always
+    depends_on:
+      - db
+    ports:
+      - "53:53/udp"
+      - "53:53/tcp"
+    volumes:
+      - ./pdns.conf:/etc/powerdns/pdns.conf:ro
+    environment:
+      - PDNS_gpgsql_user=${PDNS_DB_USER:-pdns_user}
+      - PDNS_gpgsql_password=${PDNS_DB_PASSWORD}
+      - PDNS_slave=yes
+      - PDNS_superslave=yes
+    networks:
+      - pdns-net
+
+volumes:
+  pdns-slave-db-data:
+
+networks:
+  pdns-net:
+    driver: bridge
