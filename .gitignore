@@ -1,0 +1,29 @@
+# IDEs e Editores
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# Gradle
+.gradle/
+build/
+node/.gradle/
+node/build/
+
+# Java
+*.class
+bin/
+node/bin/
+
+# Sistema Operacional
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
