@@ -23,8 +23,8 @@ services:
     depends_on:
       - db
     ports:
-      - "53:53/udp"
-      - "53:53/tcp"
+      - "53:5353/udp"
+      - "53:5353/tcp"
     volumes:
       - ./pdns.conf:/etc/powerdns/pdns.conf:ro
     environment:

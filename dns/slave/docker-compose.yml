@@ -15,7 +15,9 @@ services:
       - ../master/01-create-dbs.sql:/docker-entrypoint-initdb.d/01-create-dbs.sql:ro
       - ../master/02-pdns-schema.sql:/docker-entrypoint-initdb.d/02-pdns-schema.sql:ro
     networks:
-      - pdns-net
+      pdns-net:
+        aliases:
+          - db.local
 
   pdns-slave:
     image: powerdns/pdns-auth-48:latest
@@ -24,8 +26,8 @@ services:
     depends_on:
       - db
     ports:
-      - "53:53/udp"
-      - "53:53/tcp"
+      - "53:5353/udp"
+      - "53:5353/tcp"
     volumes:
       - ./pdns.conf:/etc/powerdns/pdns.conf:ro
     environment:
