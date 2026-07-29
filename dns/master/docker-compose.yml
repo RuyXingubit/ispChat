@@ -53,6 +53,7 @@ services:
       - GUNICORN_WORKERS=2
       - GUNICORN_LOGLEVEL=INFO
       - SECRET_KEY=${PDNS_ADMIN_SECRET_KEY}
+      - SIGNUP_ENABLED=False
     networks:
       - pdns-net
 
