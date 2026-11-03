@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'core/crypto/identity_crypto_service.dart';
 import 'core/discovery/node_discovery_service.dart';
+import 'core/messaging/e2e_session_manager.dart';
 import 'core/security/blocklist_service.dart';
 
 void main() {
@@ -38,9 +39,11 @@ class IspChatHomeScreen extends StatefulWidget {
 class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
   final IdentityCryptoService _cryptoService = IdentityCryptoService();
   final BlocklistService _blocklistService = BlocklistService();
+  late final E2eSessionManager _sessionManager;
   late final NodeDiscoveryService _discoveryService;
 
   final TextEditingController _restoreMnemonicController = TextEditingController();
+  final TextEditingController _contactUriController = TextEditingController();
   final TextEditingController _seedLinkController = TextEditingController();
   final TextEditingController _blockUuidController = TextEditingController();
 
@@ -51,6 +54,10 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
   @override
   void initState() {
     super.initState();
+    _sessionManager = E2eSessionManager(
+      cryptoService: _cryptoService,
+      blocklistService: _blocklistService,
+    );
     _discoveryService = NodeDiscoveryService(
       latencyProbe: (_) async => null,
     );
@@ -59,6 +66,7 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
   @override
   void dispose() {
     _restoreMnemonicController.dispose();
+    _contactUriController.dispose();
     _seedLinkController.dispose();
     _blockUuidController.dispose();
     super.dispose();
@@ -121,6 +129,26 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
           _isBusy = false;
         });
       }
+    }
+  }
+
+  Future<void> _handleAddContactByUri() async {
+    final String rawUri = _contactUriController.text.trim();
+    if (rawUri.isEmpty) return;
+
+    try {
+      final ContactBundle bundle = await _cryptoService.parseAndVerifyContactUri(rawUri);
+      if (!mounted) return;
+      setState(() {
+        _sessionManager.registerVerifiedContact(bundle);
+        _contactUriController.clear();
+        _statusMessage = 'Contato verificado matematicamente (Anti-Spoofing OK): ${bundle.userUuid}';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _statusMessage = 'Falha na validacao do Link Magico: $e';
+      });
     }
   }
 
@@ -193,6 +221,8 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
                       const SizedBox(height: 12),
                     ],
                     _buildIdentitySection(identity),
+                    const SizedBox(height: 16),
+                    _buildContactsSection(),
                     const SizedBox(height: 16),
                     _buildSeedDiscoverySection(),
                     const SizedBox(height: 16),
@@ -293,6 +323,64 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
     );
   }
 
+  Widget _buildContactsSection() {
+    final List<ContactBundle> contacts = _sessionManager.contacts;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            const Text(
+              '2. Contatos Verificados (QR Code / Link Magico)',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    key: const Key('input_contact_uri'),
+                    controller: _contactUriController,
+                    decoration: const InputDecoration(
+                      labelText: 'Colar Link Magico (ispchat://contact?...)',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  key: const Key('btn_add_contact'),
+                  onPressed: _handleAddContactByUri,
+                  child: const Text('Validar'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (contacts.isEmpty)
+              const Text(
+                'Nenhum contato salvo localmente. Adicione amigos via QR Code ou Link Magico.',
+              )
+            else
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: contacts
+                    .map((ContactBundle c) => Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 2),
+                          child: Text(
+                            '• ${c.userUuid} (Ed25519 + X25519 verificados)',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ))
+                    .toList(),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildSeedDiscoverySection() {
     final List<String> candidates = _discoveryService.candidateNodes;
     return Card(
@@ -302,7 +390,7 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             const Text(
-              '2. Descoberta de Nos & Bootstrap Social',
+              '3. Descoberta de Nos & Bootstrap Social',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               overflow: TextOverflow.ellipsis,
             ),
@@ -360,7 +448,7 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             const Text(
-              '3. Blocklist Local Privada (Anti-Assedio)',
+              '4. Blocklist Local Privada (Anti-Assedio)',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               overflow: TextOverflow.ellipsis,
             ),

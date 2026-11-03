@@ -1,0 +1,38 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ispchat-redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - ispchat-net
+
+  node:
+    build: .
+    container_name: ispchat-node
+    restart: always
+    depends_on:
+      - redis
+    ports:
+      - "443:443/tcp"
+    environment:
+      - SPRING_DATA_REDIS_HOST=redis
+      - SPRING_DATA_REDIS_PORT=6379
+      - GRPC_SERVER_PORT=443
+      - ISPCHAT_SECURITY_CA_CERT_PATH=/certs/ca.crt
+      - ISPCHAT_SECURITY_NODE_CERT_PATH=/certs/node.crt
+      - ISPCHAT_SECURITY_NODE_KEY_PATH=/certs/node.key
+      - ISPCHAT_SECURITY_DEV_MODE=false
+    volumes:
+      - ./certs:/certs:ro
+    networks:
+      - ispchat-net
+
+volumes:
+  redis-data:
+
+networks:
+  ispchat-net:
+    driver: bridge
