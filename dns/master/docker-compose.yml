@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   db:
-    image: postgres:15-alpine
+    image: postgres:17-alpine
     container_name: pdns-db
     restart: always
     environment:
@@ -14,10 +12,12 @@ services:
       - ./01-create-dbs.sql:/docker-entrypoint-initdb.d/01-create-dbs.sql:ro
       - ./02-pdns-schema.sql:/docker-entrypoint-initdb.d/02-pdns-schema.sql:ro
     networks:
-      - pdns-net
+      pdns-net:
+        aliases:
+          - db.local
 
   pdns:
-    image: powerdns/pdns-auth-48:latest
+    image: powerdns/pdns-auth-49:latest
     container_name: pdns-auth
     restart: always
     depends_on:
@@ -47,7 +47,7 @@ services:
     environment:
       - SQLA_DB_USER=${PDNS_DB_USER:-pdns_user}
       - SQLA_DB_PASSWORD=${PDNS_DB_PASSWORD}
-      - SQLA_DB_HOST=db
+      - SQLA_DB_HOST=db.local
       - SQLA_DB_NAME=pdnsadmin
       - GUNICORN_TIMEOUT=60
       - GUNICORN_WORKERS=2

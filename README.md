@@ -27,7 +27,7 @@ Projetado como uma arquitetura de trincheira para sobreviver a bloqueios judicia
 A stack é baseada em performance nativa e descentralização validada:
 *   **Rede DHT Kademlia:** "Diretório global" distribuído onde toda atualização exige Assinatura Digital do cliente (Anti-Spoofing).
 *   **Segurança de Infraestrutura (mTLS + CA):** Conexões gRPC entre provedores exigem um Certificado Digital assinado pela Autoridade Certificadora do ispChat, bloqueando sumariamente invasores e nós falsos.
-*   **Sinalização (Backend Java):** Microsserviços de roteamento local via `io.grpc.xds`.
+*   **Sinalização e Roteamento (Backend Java 25 LTS):** Microsserviços de alta concorrência com Virtual Threads e pool de canais gRPC mTLS direto na porta 443.
 *   **Estado e Mensageria (Redis):** Fila Offline (Store and Forward) e Broadcast de Toque Multi-dispositivos.
 *   **Aplicativo (Frontend Flutter):** App ultra leve que encarcera a Chave Privada do usuário.
 

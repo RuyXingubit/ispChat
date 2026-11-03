@@ -1,8 +1,6 @@
-version: '3.8'
-
 services:
   db:
-    image: postgres:15-alpine
+    image: postgres:17-alpine
     container_name: pdns-slave-db
     restart: always
     environment:
@@ -20,7 +18,7 @@ services:
           - db.local
 
   pdns-slave:
-    image: powerdns/pdns-auth-48:latest
+    image: powerdns/pdns-auth-49:latest
     container_name: pdns-slave
     restart: always
     depends_on:

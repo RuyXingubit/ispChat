@@ -8,31 +8,28 @@ Esta regra definida pela Liderança Técnica é a base inegociável do desenvolv
 ## 2. Níveis de Teste
 
 ### 2.1. Testes Unitários (Obrigatórios)
-- **Criptografia e Identidade (App/Backend):**
-  - Geração correta da frase de 12 palavras (BIP39) e derivação da Chave Privada/Pública.
-  - Testes matemáticos: Garantir que a encriptação/decriptação de mensagens de texto com Chave Pública/Privada funcione sem falhas.
-- **Backend (Java):** 
-  - **Segurança DHT:** Testes rigorosos na verificação de **Assinatura Digital** nos payloads da DHT (garantir que atualizações de IP forjadas sejam barradas se a assinatura não bater com o UUID).
-  - **Segurança de Infraestrutura:** Testes no validador do mTLS (simular uma conexão gRPC com um certificado não assinado pela Autoridade Certificadora do ispChat e garantir a rejeição imediata da conexão).
+- **Criptografia e Identidade Determinística (App Dart & Backend Java 25):**
+  - Geração da frase de 12 palavras (BIP39) e derivação determinística dos pares de chaves `Ed25519` (`seed[0..31]`, assinatura) e `X25519` (`seed[32..63]`, criptografia E2E).
+  - Derivação determinística do `UUIDv7` de identidade a partir de `SHA-256(ed25519_public_key)` com bits de versão `0x70` e variante `0x80` (garantindo que os mesmos vetores de teste gerem o exato mesmo UUID no Dart e no Java 25).
+  - Geração de `UUIDv7` temporal para mensagens usando `uuid-creator` (`UuidCreator.getTimeOrderedEpoch()`).
+  - Testes de encriptação/decriptação E2E (`X25519`) e assinatura canônica (`Ed25519` com prefixos `ISPCHAT-DHT-V1|` e `ISPCHAT-MSG-V1|`).
+- **Backend (Java 25 LTS):**
+  - **Segurança DHT (Anti-Spoofing e Anti-Replay):** Garantir que registros onde `deriveUuidV7(public_key) != user_uuid`, com assinatura inválida ou fora da janela de timestamp (`±5 min`) sejam rejeitados imediatamente.
+  - **Fronteira de Segurança na Porta 443:**
+    - Testar o `MtlsFederationInterceptor`: chamadas para `DhtPeerService` e `NodeRoutingService` sem certificado de cliente assinado pela CA do ispChat (`ca.crt`) devem falhar com `Status.UNAUTHENTICATED`.
+    - Testar o `ClientStreamService`: abertura de stream só deve associar a sessão e drenar a fila do Redis após validação do pacote `AUTH_HANDSHAKE` assinado.
+  - **Proteção Anti-SSRF:** Validar que o `GrpcChannelPool` bloqueia tentativas de conexão de saída para IPs de loopback/redes privadas quando fora do modo de desenvolvimento.
 - **Frontend (Flutter):**
-  - Testes na lógica do "Ping Fallback": Garantir que a matriz de IPs públicos/DNS seja percorrida e o nó com a menor latência seja eleito.
-  - Testes na **Blocklist Local**: Garantir que o evento de recebimento de Ring (Chamada) gRPC seja ignorado silenciosamente se o UUID do remetente estiver no SQLite de bloqueados.
-  - Validação da geração do Modo Doomsday (geração do QR Code com o endereço IPv6).
+  - Testes na lógica do "Ping Fallback": garantir que a matriz de IPs públicos/DNS SRV seja percorrida e o nó com a menor latência seja eleito.
+  - Testes na **Blocklist Local**: garantir que o recebimento de `RING` gRPC seja ignorado silenciosamente se o `UUIDv7` do remetente estiver bloqueado localmente.
 
 ### 2.2. Testes de Integração
-- **Fila Offline (Store and Forward):** 
-  - Subir uma instância Java + Redis local. Simular o envio de texto E2E para um UUID marcado como Offline. Validar se a mensagem entra corretamente na `Redis List`. Em seguida, alterar o status do UUID para Online na DHT e verificar o esvaziamento imediato da fila.
+- **Fila Offline (Store and Forward):**
+  - Simular envio de texto E2E para um `UUIDv7` offline. Validar persistência na `Redis List`. Conectar o cliente enviando `AUTH_HANDSHAKE` e verificar o descarregamento e limpeza imediata da fila.
 - **Broadcast Multi-dispositivo (Redis Pub/Sub):**
-  - Inserir na DHT um array de 3 sessões/aparelhos ativos para o mesmo UUID. Disparar uma chamada gRPC e verificar se o nó Java e o Redis executam o fan-out paralelo para as 3 rotas.
+  - Registrar 2 ou mais sessões ativas para o mesmo `UUIDv7` e verificar o disparo simultâneo de chamada (`RING`) e mensagens para todas as streams abertas.
 
 ### 2.3. Testes End-to-End (E2E)
-- Validação manual e automatizada do fluxo de ponta a ponta:
-  1. Conexão mTLS validada entre o Nó A e o Nó B.
-  2. Aparelho 1 criptografa o texto e envia. Aparelho 2 recebe, descriptografa com sua Chave Privada e lê. (Deve-se auditar pacotes com Wireshark para garantir que o payload trafegado no Nó Java seja indecifrável).
-  3. Desligar a rede e religar para atestar a conexão direta IPv6 (P2P Puro) com o túnel WebRTC sem servidor STUN.
-
-## 3. Critérios de Aceite para o MVP
-- A suíte passa em 100% dos testes criptográficos (geração de chave, mTLS e assinatura da DHT).
-- A infraestrutura Java rejeita conexões de roteamento vindo de IPs desconhecidos/sem certificado CA do ispChat (anti-Sybil).
-- Dois clientes completam o ciclo WebRTC roteando a sinalização através de dois nós ISPs autônomos.
-- Mensagens enviadas a aparelhos sem internet são entregues 100% das vezes quando a rede é restaurada.
+1. Conexão mTLS validada entre Nó A e Nó B com certificados gerados pela CA (`extendedKeyUsage = serverAuth, clientAuth`).
+2. Aparelho 1 criptografa texto e envia; Aparelho 2 recebe, valida assinatura do remetente e descriptografa com sua chave privada.
+3. Fluxo completo de sinalização WebRTC entre dois nós autônomos.

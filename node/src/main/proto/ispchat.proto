@@ -6,89 +6,164 @@ option java_multiple_files = true;
 option java_package = "br.dev.ispchat.grpc";
 option java_outer_classname = "IspChatProto";
 
-// Tipos de mensagens trafegadas na rede
+// Tipos de mensagens e eventos trafegados na rede
 enum MessageType {
   UNKNOWN = 0;
-  TEXT = 1;         // Mensagem de texto criptografada E2E
-  RING = 2;         // Notificação de chamada telefônica
-  SDP_OFFER = 3;    // Sinalização WebRTC (Metadados E2E)
-  SDP_ANSWER = 4;   // Sinalização WebRTC (Metadados E2E)
-  ICE_CANDIDATE = 5;// Estabelecimento de rotas NAT WebRTC
+  TEXT = 1;            // Mensagem de texto criptografada E2E (X25519 + cifra autenticada)
+  RING = 2;            // Notificacao de chamada telefonica (disparo multi-device)
+  SDP_OFFER = 3;       // Sinalizacao WebRTC (Metadados E2E)
+  SDP_ANSWER = 4;      // Sinalizacao WebRTC (Metadados E2E)
+  ICE_CANDIDATE = 5;   // Estabelecimento de rotas NAT WebRTC
+  CALL_DECLINE = 6;    // Recusa/encerramento de chamada
+  AUTH_HANDSHAKE = 7;  // Pacote inicial de autenticacao Ed25519 ao abrir stream Connect
 }
 
-// ---------------------------------------------------------
-// 1. DhtService (Gerenciamento de Presença Kademlia)
-// ---------------------------------------------------------
-service DhtService {
-  // App notifica o Nó: "Estou online. Diga para a rede (DHT) me encontrar neste Nó"
+// =========================================================================
+// FRONTEIRA DE BORDA (App Flutter <-> No Local - Porta 443 TLS + Ed25519)
+// =========================================================================
+
+// 1. DhtClientService (Gerenciamento de Presenca pelo App)
+service DhtClientService {
+  // App notifica o No: "Estou online. Anuncie minha presenca na DHT"
+  // Validacao obrigatoria: deriveUuidV7(public_key) == user_uuid + assinatura Ed25519
+  // Payload canonico assinado: "ISPCHAT-DHT-V1|" + user_uuid + "|" + node_address + "|" + timestamp
   rpc RegisterSession (RegisterSessionRequest) returns (RegisterSessionResponse);
-  
-  // Consulta a DHT para saber em quais Nós o usuário destino está logado
+
+  // App consulta o No para descobrir em quais Nos o destinatario esta logado
   rpc FindUserSessions (FindUserSessionsRequest) returns (FindUserSessionsResponse);
 }
 
 message RegisterSessionRequest {
-  string user_uuid = 1;        // Identidade: UUIDv7 do cliente
-  string node_address = 2;     // IP/Hostname do nó host (a porta será sempre 443 mTLS)
-  bytes public_key = 3;        // Chave pública para validação da assinatura
-  bytes signature = 4;         // Assinatura digital protegendo o registro
-  int64 timestamp = 5;         // Proteção contra replay attack
+  string user_uuid = 1;        // Identidade deterministica: UUIDv7 derivado de SHA-256(public_key)
+  string node_address = 2;     // IP/Hostname do no host (porta 443)
+  bytes public_key = 3;        // Chave publica Ed25519 (32 bytes raw)
+  bytes x25519_public_key = 4; // Chave publica X25519 (32 bytes raw) para criptografia E2E
+  bytes signature = 5;         // Assinatura digital Ed25519 (64 bytes)
+  int64 timestamp = 6;         // Unix epoch em milissegundos (janela anti-replay +/- 5 min)
 }
 
 message RegisterSessionResponse {
   bool success = 1;
+  string error_message = 2;
 }
 
 message FindUserSessionsRequest {
   string target_uuid = 1;      // UUIDv7 buscado
 }
 
+message UserSessionInfo {
+  string node_address = 1;     // Ex: "node-sp.isp.com"
+  bytes ed25519_public_key = 2;
+  bytes x25519_public_key = 3;
+  int64 timestamp = 4;
+}
+
 message FindUserSessionsResponse {
-  repeated string node_addresses = 1; // Ex: ["node-sp.isp.com", "node-rj.isp.com"] (Porta sempre 443)
+  repeated string node_addresses = 1;
+  repeated UserSessionInfo sessions = 2;
 }
 
-// ---------------------------------------------------------
-// 2. NodeRoutingService (Comunicação Nó-a-Nó via mTLS)
-// ---------------------------------------------------------
-service NodeRoutingService {
-  // Roteador de pacotes entre Provedores. Totalmente "cego" ao payload.
-  rpc RoutePayload (RoutePayloadRequest) returns (RoutePayloadResponse);
-}
-
-message RoutePayloadRequest {
-  string message_id = 1;       // UUIDv7 da mensagem
-  string sender_uuid = 2;      // UUIDv7 (Remetente)
-  string receiver_uuid = 3;    // UUIDv7 (Destinatário)
-  MessageType type = 4;
-  bytes encrypted_payload = 5; // Carga opaca criptografada com a chave do destinatário
-  int64 timestamp = 6;
-}
-
-message RoutePayloadResponse {
-  bool delivered = 1;          // True = Entregue ou armazenado na Redis List
-}
-
-// ---------------------------------------------------------
-// 3. ClientStreamService (Comunicação Flutter <-> Nó Local)
-// ---------------------------------------------------------
+// 2. ClientStreamService (Stream Bidirecional App Flutter <-> No Local)
 service ClientStreamService {
-  // Stream bidirecional persistente.
-  // Flutter envia 'ClientEnvelope' e Nó entrega 'ServerEnvelope'.
+  // O primeiro pacote enviado pelo App deve ser MessageType.AUTH_HANDSHAKE assinado.
+  // Payload canonico assinado:
+  // "ISPCHAT-MSG-V1|" + message_id + "|" + sender_uuid + "|" + receiver_uuid + "|" + type_number + "|" + timestamp + "|" + encrypted_payload
   rpc Connect (stream ClientEnvelope) returns (stream ServerEnvelope);
 }
 
 message ClientEnvelope {
-  string message_id = 1;       // UUIDv7
-  string receiver_uuid = 2;    // UUIDv7 do destinatário
-  MessageType type = 3;
-  bytes encrypted_payload = 4;
-  bytes signature = 5;         // Garante que o App local é quem diz ser
+  string message_id = 1;        // UUIDv7 temporal da mensagem/evento
+  string sender_uuid = 2;       // UUIDv7 deterministico do remetente
+  string receiver_uuid = 3;     // UUIDv7 deterministico do destinatario
+  MessageType type = 4;
+  bytes encrypted_payload = 5;  // Carga opaca criptografada E2E
+  bytes sender_public_key = 6;  // Chave publica Ed25519 (32 bytes raw) do remetente
+  bytes signature = 7;          // Assinatura Ed25519 garantindo autenticidade e integridade
+  int64 timestamp = 8;          // Unix epoch em milissegundos
 }
 
 message ServerEnvelope {
-  string message_id = 1;       // UUIDv7
-  string sender_uuid = 2;      // UUIDv7
+  string message_id = 1;        // UUIDv7 temporal da mensagem/evento
+  string sender_uuid = 2;       // UUIDv7 deterministico do remetente
   MessageType type = 3;
   bytes encrypted_payload = 4;
-  int64 timestamp = 5;
+  bytes sender_public_key = 5;  // Chave publica Ed25519 do remetente para validacao E2E no destino
+  bytes signature = 6;          // Assinatura original Ed25519 do remetente preservada ponta a ponta
+  int64 timestamp = 7;
+}
+
+// =========================================================================
+// FRONTEIRA DE FEDERACAO (No ISP <-> No ISP - Porta 443 mTLS CA Obrigatorio)
+// =========================================================================
+
+// 3. DhtPeerService (Protocolo Kademlia entre Nos de Provedores via mTLS)
+service DhtPeerService {
+  rpc Ping (PingRequest) returns (PingResponse);
+  rpc Store (StoreRequest) returns (StoreResponse);
+  rpc FindNode (FindNodeRequest) returns (FindNodeResponse);
+  rpc FindValue (FindValueRequest) returns (FindValueResponse);
+}
+
+message PingRequest {
+  string sender_node_id = 1;
+  string sender_address = 2;
+}
+
+message PingResponse {
+  string responder_node_id = 1;
+}
+
+message StoreRequest {
+  string user_uuid = 1;         // Chave Kademlia: UUIDv7 deterministico do usuario
+  string node_address = 2;      // Endereco do No onde o usuario esta conectado
+  bytes public_key = 3;         // Chave publica Ed25519 (32 bytes) para verificacao anti-spoofing
+  bytes x25519_public_key = 4;  // Chave publica X25519 (32 bytes)
+  bytes signature = 5;          // Assinatura Ed25519 gerada pelo cliente sobre ISPCHAT-DHT-V1
+  int64 timestamp = 6;          // Timestamp para protecao anti-replay
+}
+
+message StoreResponse {
+  bool success = 1;
+}
+
+message NodeInfo {
+  string node_id = 1;
+  string node_address = 2;
+}
+
+message FindNodeRequest {
+  string target_id = 1;
+}
+
+message FindNodeResponse {
+  repeated NodeInfo closest_nodes = 1;
+}
+
+message FindValueRequest {
+  string target_uuid = 1;
+}
+
+message FindValueResponse {
+  repeated UserSessionInfo sessions = 1;
+  repeated NodeInfo closest_nodes = 2;
+}
+
+// 4. NodeRoutingService (Roteamento Cego de Payloads entre Provedores via mTLS)
+service NodeRoutingService {
+  rpc RoutePayload (RoutePayloadRequest) returns (RoutePayloadResponse);
+}
+
+message RoutePayloadRequest {
+  string message_id = 1;        // UUIDv7 temporal da mensagem
+  string sender_uuid = 2;       // UUIDv7 do remetente
+  string receiver_uuid = 3;     // UUIDv7 do destinatario
+  MessageType type = 4;
+  bytes encrypted_payload = 5;  // Carga opaca criptografada E2E
+  bytes sender_public_key = 6;  // Chave publica Ed25519 do remetente
+  bytes signature = 7;          // Assinatura Ed25519 do remetente
+  int64 timestamp = 8;
+}
+
+message RoutePayloadResponse {
+  bool delivered = 1;           // True = Entregue na stream ativa ou persistido na Redis List
 }

@@ -1,30 +1,41 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
+import 'package:app/main.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:app/main.dart';
-
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('Deve renderizar a interface sem overflow em tela estreita e permitir bloqueio e seed injection',
+      (WidgetTester tester) async {
+    // Simula tela estreita (320x568) para testar tolerancia zero a overflow
+    tester.view.physicalSize = const Size(320, 568);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    await tester.pumpWidget(const IspChatApp());
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
+    expect(find.text('1. Identidade Auto-Soberana (UUIDv7 + BIP39)'), findsOneWidget);
+    expect(find.text('Nenhum UUIDv7 bloqueado localmente.'), findsOneWidget);
+
+    // Injeta um link social de seed
+    await tester.ensureVisible(find.byKey(const Key('input_seed_link')));
+    await tester.enterText(
+      find.byKey(const Key('input_seed_link')),
+      'ispchat://seed?ip=203.0.113.50',
+    );
+    await tester.ensureVisible(find.byKey(const Key('btn_inject_seed')));
+    await tester.tap(find.byKey(const Key('btn_inject_seed')));
     await tester.pump();
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    expect(find.textContaining('203.0.113.50'), findsWidgets);
+
+    // Bloqueia um UUIDv7 na blocklist local
+    const String targetUuid = '01950000-0000-7000-8000-000000000999';
+    await tester.ensureVisible(find.byKey(const Key('input_block_uuid')));
+    await tester.enterText(find.byKey(const Key('input_block_uuid')), targetUuid);
+    await tester.ensureVisible(find.byKey(const Key('btn_block_uuid')));
+    await tester.tap(find.byKey(const Key('btn_block_uuid')));
+    await tester.pump();
+
+    expect(find.text(targetUuid), findsOneWidget);
   });
 }
