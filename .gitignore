@@ -27,3 +27,13 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Segredos, Variaveis de Ambiente e Certificados de Producao
+.env
+**/.env
+!**/.env.example
+node/certs/
+ca/*.key
+!ca/dev-node.key
+ca/*.srl
+ca/*.csr

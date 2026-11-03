@@ -21,11 +21,34 @@ services:
       - SPRING_DATA_REDIS_HOST=redis
       - SPRING_DATA_REDIS_PORT=6379
       - GRPC_SERVER_PORT=443
+      - ISPCHAT_NODE_ID=${ISPCHAT_NODE_ID:-node1.ispchat.dev.br}
       - ISPCHAT_SECURITY_CA_CERT_PATH=/certs/ca.crt
       - ISPCHAT_SECURITY_NODE_CERT_PATH=/certs/node.crt
       - ISPCHAT_SECURITY_NODE_KEY_PATH=/certs/node.key
       - ISPCHAT_SECURITY_DEV_MODE=false
     volumes:
+      - ./certs:/certs:ro
+    networks:
+      - ispchat-net
+
+  coturn:
+    image: coturn/coturn:latest
+    container_name: ispchat-coturn
+    restart: always
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "5349:5349/tcp"
+      - "5349:5349/udp"
+      - "49152-49252:49152-49252/udp"
+    command:
+      - "-c"
+      - "/etc/coturn/turnserver.conf"
+      - "--realm=${ISP_DOMAIN:-ispchat.dev.br}"
+      - "--external-ip=${ISP_EXTERNAL_IP:-127.0.0.1}"
+      - "--static-auth-secret=${TURN_STATIC_AUTH_SECRET:-change_me_in_env}"
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
       - ./certs:/certs:ro
     networks:
       - ispchat-net
