@@ -1,0 +1,92 @@
+name: ISP Chat CI
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE'
+      - 'docs/**'
+      - '.agents/**'
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE'
+      - 'docs/**'
+      - '.agents/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-test:
+    name: Backend Node (Java 25 LTS & mTLS/DHT Tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 25 LTS
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '25'
+          cache: 'gradle'
+
+      - name: Generate Ephemeral Test CA & Node Certificates for CI
+        working-directory: ca
+        run: |
+          openssl genrsa -out ca.key 4096
+          openssl req -x509 -new -nodes -key ca.key -sha256 -days 365 -out ca.crt \
+            -subj "/C=BR/ST=SP/L=Sao Paulo/O=ispChat/OU=Engineering/CN=ispChat Root CA"
+          openssl genrsa -out dev-node.key 4096
+          openssl req -new -key dev-node.key -out dev-node.csr \
+            -subj "/C=BR/ST=SP/L=Sao Paulo/O=ispChat Node/OU=Routing/CN=dev-node"
+          cat > extfile.cnf << EOF
+          authorityKeyIdentifier=keyid,issuer
+          basicConstraints=CA:FALSE
+          keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+          extendedKeyUsage = serverAuth, clientAuth
+          subjectAltName = @alt_names
+          [alt_names]
+          IP.1 = 127.0.0.1
+          DNS.1 = localhost
+          EOF
+          openssl x509 -req -in dev-node.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+            -out dev-node.crt -days 365 -sha256 -extfile extfile.cnf
+          rm -f extfile.cnf
+
+      - name: Run Gradle Unit & Integration Tests
+        working-directory: node
+        run: ./gradlew test --no-daemon
+
+  frontend-test:
+    name: Frontend App (Flutter Analyze & Unit/Widget Tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Install Dependencies
+        working-directory: app
+        run: flutter pub get
+
+      - name: Run Static Analysis
+        working-directory: app
+        run: flutter analyze
+
+      - name: Run Unit & Widget Tests
+        working-directory: app
+        run: flutter test
