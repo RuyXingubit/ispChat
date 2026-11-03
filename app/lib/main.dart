@@ -2,15 +2,24 @@ import 'package:flutter/material.dart';
 
 import 'core/crypto/identity_crypto_service.dart';
 import 'core/discovery/node_discovery_service.dart';
+import 'core/discovery/tcp_latency_probe.dart';
 import 'core/messaging/e2e_session_manager.dart';
 import 'core/security/blocklist_service.dart';
+import 'core/storage/secure_local_vault.dart';
+import 'ui/contact_chat_screen.dart';
+import 'ui/identity_qr_dialog.dart';
 
 void main() {
   runApp(const IspChatApp());
 }
 
 class IspChatApp extends StatelessWidget {
-  const IspChatApp({super.key});
+  final KeyValueSecureStore? customSecureStore;
+
+  const IspChatApp({
+    super.key,
+    this.customSecureStore,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -24,13 +33,18 @@ class IspChatApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const IspChatHomeScreen(),
+      home: IspChatHomeScreen(customSecureStore: customSecureStore),
     );
   }
 }
 
 class IspChatHomeScreen extends StatefulWidget {
-  const IspChatHomeScreen({super.key});
+  final KeyValueSecureStore? customSecureStore;
+
+  const IspChatHomeScreen({
+    super.key,
+    this.customSecureStore,
+  });
 
   @override
   State<IspChatHomeScreen> createState() => _IspChatHomeScreenState();
@@ -39,8 +53,10 @@ class IspChatHomeScreen extends StatefulWidget {
 class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
   final IdentityCryptoService _cryptoService = IdentityCryptoService();
   final BlocklistService _blocklistService = BlocklistService();
+  final TcpLatencyProbe _tcpProbe = const TcpLatencyProbe();
   late final E2eSessionManager _sessionManager;
   late final NodeDiscoveryService _discoveryService;
+  late final SecureLocalVault _vault;
 
   final TextEditingController _restoreMnemonicController = TextEditingController();
   final TextEditingController _contactUriController = TextEditingController();
@@ -59,8 +75,40 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
       blocklistService: _blocklistService,
     );
     _discoveryService = NodeDiscoveryService(
-      latencyProbe: (_) async => null,
+      latencyProbe: _tcpProbe.measureLatencyMs,
     );
+    _vault = SecureLocalVault(
+      store: widget.customSecureStore ?? FlutterSecureKeyValueStore(),
+      cryptoService: _cryptoService,
+    );
+    _hydrateFromSecureVault();
+  }
+
+  Future<void> _hydrateFromSecureVault() async {
+    final UserIdentity? savedIdentity = await _vault.loadSavedIdentity();
+    final List<ContactBundle> savedContacts = await _vault.loadContacts();
+    final List<String> savedBlocks = await _vault.loadBlockedUuids();
+    final List<String> savedSeeds = await _vault.loadSeedNodes();
+
+    for (final ContactBundle c in savedContacts) {
+      _sessionManager.registerVerifiedContact(c);
+    }
+    for (final String b in savedBlocks) {
+      _blocklistService.blockUuid(b);
+    }
+    for (final String s in savedSeeds) {
+      _discoveryService.addCandidateNode(s);
+    }
+
+    if (!mounted) return;
+    if (savedIdentity != null ||
+        savedContacts.isNotEmpty ||
+        savedBlocks.isNotEmpty ||
+        savedSeeds.isNotEmpty) {
+      setState(() {
+        _currentIdentity = savedIdentity;
+      });
+    }
   }
 
   @override
@@ -79,10 +127,12 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
     });
     try {
       final UserIdentity identity = await _cryptoService.generateNewIdentity();
+      await _vault.saveIdentityMnemonic(identity.mnemonic);
       if (!mounted) return;
       setState(() {
         _currentIdentity = identity;
-        _statusMessage = 'Identidade auto-soberana gerada localmente (UUIDv7 + Ed25519/X25519).';
+        _statusMessage =
+            'Identidade auto-soberana gerada e salva no cofre seguro (UUIDv7 + Ed25519/X25519).';
       });
     } catch (e) {
       if (!mounted) return;
@@ -113,10 +163,11 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
     });
     try {
       final UserIdentity identity = await _cryptoService.restoreIdentityFromMnemonic(raw);
+      await _vault.saveIdentityMnemonic(identity.mnemonic);
       if (!mounted) return;
       setState(() {
         _currentIdentity = identity;
-        _statusMessage = 'Identidade restaurada deterministicamente com sucesso.';
+        _statusMessage = 'Identidade restaurada deterministicamente e salva no cofre.';
       });
     } catch (e) {
       if (!mounted) return;
@@ -138,9 +189,10 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
 
     try {
       final ContactBundle bundle = await _cryptoService.parseAndVerifyContactUri(rawUri);
+      _sessionManager.registerVerifiedContact(bundle);
+      await _vault.saveContacts(_sessionManager.contacts);
       if (!mounted) return;
       setState(() {
-        _sessionManager.registerVerifiedContact(bundle);
         _contactUriController.clear();
         _statusMessage = 'Contato verificado matematicamente (Anti-Spoofing OK): ${bundle.userUuid}';
       });
@@ -152,14 +204,16 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
     }
   }
 
-  void _handleInjectSeed() {
+  Future<void> _handleInjectSeed() async {
     final String link = _seedLinkController.text.trim();
     if (link.isEmpty) return;
     try {
       final String added = _discoveryService.injectSocialSeedLink(link);
+      await _vault.saveSeedNodes(_discoveryService.candidateNodes);
+      if (!mounted) return;
       _seedLinkController.clear();
       setState(() {
-        _statusMessage = 'No semente injetado: $added';
+        _statusMessage = 'No semente injetado e persistido: $added';
       });
     } catch (e) {
       setState(() {
@@ -168,14 +222,47 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
     }
   }
 
-  void _handleBlockUuid() {
+  Future<void> _handleBlockUuid() async {
     final String uuid = _blockUuidController.text.trim();
     if (uuid.isEmpty) return;
+    _blocklistService.blockUuid(uuid);
+    await _vault.saveBlockedUuids(_blocklistService.blockedUuids);
+    if (!mounted) return;
     setState(() {
-      _blocklistService.blockUuid(uuid);
       _blockUuidController.clear();
       _statusMessage = 'UUID bloqueado localmente no aparelho.';
     });
+  }
+
+  void _openQrDialog(UserIdentity identity) {
+    showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) => IdentityQrDialog(
+        identity: identity,
+        cryptoService: _cryptoService,
+      ),
+    );
+  }
+
+  void _openContactChat(ContactBundle contact) {
+    final UserIdentity? identity = _currentIdentity;
+    if (identity == null) {
+      setState(() {
+        _statusMessage = 'Gere ou restaure sua identidade antes de iniciar uma conversa E2E.';
+      });
+      return;
+    }
+
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext ctx) => ContactChatScreen(
+          localIdentity: identity,
+          contact: contact,
+          sessionManager: _sessionManager,
+          vault: _vault,
+        ),
+      ),
+    );
   }
 
   @override
@@ -316,6 +403,19 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
                 key: const Key('txt_contact_uri'),
                 maxLines: 3,
               ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: <Widget>[
+                  FilledButton.icon(
+                    key: const Key('btn_show_qr_code'),
+                    onPressed: () => _openQrDialog(identity),
+                    icon: const Icon(Icons.qr_code),
+                    label: const Text('Exibir QR Code / Modo Doomsday IPv6'),
+                  ),
+                ],
+              ),
             ],
           ],
         ),
@@ -364,14 +464,24 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
               )
             else
               Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: contacts
-                    .map((ContactBundle c) => Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 2),
-                          child: Text(
-                            '• ${c.userUuid} (Ed25519 + X25519 verificados)',
+                    .map((ContactBundle c) => ListTile(
+                          key: Key('contact_tile_${c.userUuid}'),
+                          contentPadding: EdgeInsets.zero,
+                          leading: const Icon(Icons.verified_user_outlined),
+                          title: Text(
+                            c.userUuid,
                             overflow: TextOverflow.ellipsis,
                           ),
+                          subtitle: Text(
+                            c.directIpv6Address != null
+                                ? 'Ed25519 + X25519 OK • IPv6: ${c.directIpv6Address}'
+                                : 'Ed25519 + X25519 verificados',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          trailing: const Icon(Icons.chat_bubble_outline),
+                          onTap: () => _openContactChat(c),
                         ))
                     .toList(),
               ),
@@ -491,10 +601,11 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
                             IconButton(
                               icon: const Icon(Icons.delete_outline, size: 20),
                               tooltip: 'Desbloquear',
-                              onPressed: () {
-                                setState(() {
-                                  _blocklistService.unblockUuid(uuid);
-                                });
+                              onPressed: () async {
+                                _blocklistService.unblockUuid(uuid);
+                                await _vault.saveBlockedUuids(_blocklistService.blockedUuids);
+                                if (!mounted) return;
+                                setState(() {});
                               },
                             ),
                           ],
