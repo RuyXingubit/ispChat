@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../core/crypto/identity_crypto_service.dart';
+import '../core/grpc/ispchat_node_client.dart';
 import '../core/grpc/ispchat_pb.dart';
 import '../core/messaging/e2e_session_manager.dart';
 import '../core/storage/secure_local_vault.dart';
@@ -13,6 +16,7 @@ class ContactChatScreen extends StatefulWidget {
   final ContactBundle contact;
   final E2eSessionManager sessionManager;
   final SecureLocalVault vault;
+  final IspChatNodeClient? nodeClient;
 
   const ContactChatScreen({
     super.key,
@@ -20,6 +24,7 @@ class ContactChatScreen extends StatefulWidget {
     required this.contact,
     required this.sessionManager,
     required this.vault,
+    this.nodeClient,
   });
 
   @override
@@ -29,6 +34,7 @@ class ContactChatScreen extends StatefulWidget {
 class _ContactChatScreenState extends State<ContactChatScreen> {
   final TextEditingController _messageController = TextEditingController();
   late final WebRtcCallCoordinator _callCoordinator;
+  StreamSubscription<DecryptedIncomingEvent>? _incomingSub;
 
   List<StoredChatMessage> _messages = <StoredChatMessage>[];
   String? _cryptoStatusBanner;
@@ -39,12 +45,48 @@ class _ContactChatScreenState extends State<ContactChatScreen> {
     super.initState();
     _callCoordinator = WebRtcCallCoordinator(sessionManager: widget.sessionManager);
     _loadSavedMessages();
+    _incomingSub = widget.nodeClient?.incomingEvents.listen(_onIncomingEvent);
   }
 
   @override
   void dispose() {
+    _incomingSub?.cancel();
     _messageController.dispose();
     super.dispose();
+  }
+
+  Future<void> _onIncomingEvent(DecryptedIncomingEvent event) async {
+    if (event.senderUuid.toLowerCase() != widget.contact.userUuid.toLowerCase()) {
+      return;
+    }
+
+    if (event.type == ProtoMessageType.text) {
+      final StoredChatMessage incomingMsg = StoredChatMessage(
+        messageId: event.messageId,
+        senderUuid: event.senderUuid,
+        receiverUuid: widget.localIdentity.userUuid,
+        text: event.cleartextOrJsonSignal,
+        timestampMillis: event.timestampMillis,
+        isOutgoing: false,
+      );
+      final List<StoredChatMessage> updated =
+          await widget.vault.appendChatMessage(widget.contact.userUuid, incomingMsg);
+      if (!mounted) return;
+      setState(() {
+        _messages = updated;
+        _cryptoStatusBanner = 'Mensagem E2E recebida em tempo real via stream gRPC.';
+      });
+    } else if (event.type == ProtoMessageType.ring ||
+        event.type == ProtoMessageType.sdpOffer ||
+        event.type == ProtoMessageType.sdpAnswer ||
+        event.type == ProtoMessageType.iceCandidate ||
+        event.type == ProtoMessageType.callDecline) {
+      final WebRtcCallSnapshot snap = _callCoordinator.handleIncomingSignalingEvent(event);
+      if (!mounted) return;
+      setState(() {
+        _cryptoStatusBanner = 'Sinal WebRTC E2E recebido (${snap.state.name}).';
+      });
+    }
   }
 
   Future<void> _loadSavedMessages() async {
@@ -86,12 +128,15 @@ class _ContactChatScreenState extends State<ContactChatScreen> {
       final List<StoredChatMessage> updated =
           await widget.vault.appendChatMessage(widget.contact.userUuid, stored);
 
+      final bool sentLive = widget.nodeClient?.sendSignedEnvelope(envelope) ?? false;
+
       if (!mounted) return;
       _messageController.clear();
       setState(() {
         _messages = updated;
-        _cryptoStatusBanner =
-            'Pacote E2E assinado (${envelope.encryptedPayload.length} bytes cifrados, ID: ${envelope.messageId.substring(0, 8)}...)';
+        _cryptoStatusBanner = sentLive
+            ? 'Pacote E2E assinado e transmitido via gRPC (${envelope.encryptedPayload.length} bytes cifrados, ID: ${envelope.messageId.substring(0, 8)}...)'
+            : 'Pacote E2E assinado (${envelope.encryptedPayload.length} bytes cifrados, ID: ${envelope.messageId.substring(0, 8)}...)';
       });
     } finally {
       if (mounted) {
@@ -104,12 +149,13 @@ class _ContactChatScreenState extends State<ContactChatScreen> {
 
   Future<void> _handleStartCall({required bool video}) async {
     final String callId = widget.sessionManager.cryptoService.generateTemporalUuidV7();
-    await _callCoordinator.initiateCallRing(
+    final ClientEnvelopeProto ringEnvelope = await _callCoordinator.initiateCallRing(
       callerIdentity: widget.localIdentity,
       calleeContact: widget.contact,
       callId: callId,
       videoEnabled: video,
     );
+    widget.nodeClient?.sendSignedEnvelope(ringEnvelope);
     if (!mounted) return;
     setState(() {
       _cryptoStatusBanner = video
@@ -121,11 +167,12 @@ class _ContactChatScreenState extends State<ContactChatScreen> {
   Future<void> _handleEndCall() async {
     final String callId = _callCoordinator.currentCall.callId ??
         widget.sessionManager.cryptoService.generateTemporalUuidV7();
-    await _callCoordinator.declineOrHangupCall(
+    final ClientEnvelopeProto declineEnvelope = await _callCoordinator.declineOrHangupCall(
       localIdentity: widget.localIdentity,
       peerContact: widget.contact,
       callId: callId,
     );
+    widget.nodeClient?.sendSignedEnvelope(declineEnvelope);
     if (!mounted) return;
     setState(() {
       _cryptoStatusBanner = 'Chamada encerrada (CALL_DECLINE E2E assinado).';

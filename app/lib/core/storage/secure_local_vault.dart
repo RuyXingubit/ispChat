@@ -232,18 +232,22 @@ class SecureLocalVault {
     }
   }
 
-  /// Adiciona uma mensagem ao historico local de conversa com um contato especifico.
+  /// Adiciona uma mensagem ao historico local de conversa com um contato especifico (idempotente por messageId).
   Future<List<StoredChatMessage>> appendChatMessage(
     String peerUuid,
     StoredChatMessage message,
   ) async {
     final List<StoredChatMessage> current = await loadChatMessages(peerUuid);
-    current.add(message);
-    final String key = '$_keyMessagesPrefix${peerUuid.trim().toLowerCase()}';
-    await store.write(
-      key,
-      jsonEncode(current.map((StoredChatMessage m) => m.toJson()).toList()),
-    );
+    final bool alreadyExists =
+        current.any((StoredChatMessage m) => m.messageId == message.messageId);
+    if (!alreadyExists) {
+      current.add(message);
+      final String key = '$_keyMessagesPrefix${peerUuid.trim().toLowerCase()}';
+      await store.write(
+        key,
+        jsonEncode(current.map((StoredChatMessage m) => m.toJson()).toList()),
+      );
+    }
     return current;
   }
 

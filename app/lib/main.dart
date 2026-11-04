@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'core/crypto/identity_crypto_service.dart';
 import 'core/discovery/node_discovery_service.dart';
 import 'core/discovery/tcp_latency_probe.dart';
+import 'core/grpc/ispchat_node_client.dart';
+import 'core/grpc/ispchat_pb.dart';
 import 'core/messaging/e2e_session_manager.dart';
 import 'core/security/blocklist_service.dart';
 import 'core/storage/secure_local_vault.dart';
@@ -15,10 +19,18 @@ void main() {
 
 class IspChatApp extends StatelessWidget {
   final KeyValueSecureStore? customSecureStore;
+  final LatencyProbe? customLatencyProbe;
+  final IspChatNodeClient? customNodeClient;
+  final int? testNodePortOverride;
+  final bool useInsecureLocalTestTransport;
 
   const IspChatApp({
     super.key,
     this.customSecureStore,
+    this.customLatencyProbe,
+    this.customNodeClient,
+    this.testNodePortOverride,
+    this.useInsecureLocalTestTransport = false,
   });
 
   @override
@@ -33,17 +45,31 @@ class IspChatApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: IspChatHomeScreen(customSecureStore: customSecureStore),
+      home: IspChatHomeScreen(
+        customSecureStore: customSecureStore,
+        customLatencyProbe: customLatencyProbe,
+        customNodeClient: customNodeClient,
+        testNodePortOverride: testNodePortOverride,
+        useInsecureLocalTestTransport: useInsecureLocalTestTransport,
+      ),
     );
   }
 }
 
 class IspChatHomeScreen extends StatefulWidget {
   final KeyValueSecureStore? customSecureStore;
+  final LatencyProbe? customLatencyProbe;
+  final IspChatNodeClient? customNodeClient;
+  final int? testNodePortOverride;
+  final bool useInsecureLocalTestTransport;
 
   const IspChatHomeScreen({
     super.key,
     this.customSecureStore,
+    this.customLatencyProbe,
+    this.customNodeClient,
+    this.testNodePortOverride,
+    this.useInsecureLocalTestTransport = false,
   });
 
   @override
@@ -57,6 +83,8 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
   late final E2eSessionManager _sessionManager;
   late final NodeDiscoveryService _discoveryService;
   late final SecureLocalVault _vault;
+  late final IspChatNodeClient _nodeClient;
+  StreamSubscription<DecryptedIncomingEvent>? _nodeIncomingSub;
 
   final TextEditingController _restoreMnemonicController = TextEditingController();
   final TextEditingController _contactUriController = TextEditingController();
@@ -75,13 +103,36 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
       blocklistService: _blocklistService,
     );
     _discoveryService = NodeDiscoveryService(
-      latencyProbe: _tcpProbe.measureLatencyMs,
+      latencyProbe: widget.customLatencyProbe ?? _tcpProbe.measureLatencyMs,
     );
     _vault = SecureLocalVault(
       store: widget.customSecureStore ?? FlutterSecureKeyValueStore(),
       cryptoService: _cryptoService,
     );
+    _nodeClient = widget.customNodeClient ?? IspChatNodeClient(sessionManager: _sessionManager);
+    _nodeIncomingSub = _nodeClient.incomingEvents.listen(_onIncomingNodeEvent);
     _hydrateFromSecureVault();
+  }
+
+  Future<void> _onIncomingNodeEvent(DecryptedIncomingEvent event) async {
+    final UserIdentity? identity = _currentIdentity;
+    if (identity == null) return;
+
+    if (event.type == ProtoMessageType.text) {
+      final StoredChatMessage msg = StoredChatMessage(
+        messageId: event.messageId,
+        senderUuid: event.senderUuid,
+        receiverUuid: identity.userUuid,
+        text: event.cleartextOrJsonSignal,
+        timestampMillis: event.timestampMillis,
+        isOutgoing: false,
+      );
+      await _vault.appendChatMessage(event.senderUuid, msg);
+      if (!mounted) return;
+      setState(() {
+        _statusMessage = 'Nova mensagem E2E recebida de ${event.senderUuid.substring(0, 8)}...';
+      });
+    }
   }
 
   Future<void> _hydrateFromSecureVault() async {
@@ -113,6 +164,8 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
 
   @override
   void dispose() {
+    _nodeIncomingSub?.cancel();
+    _nodeClient.dispose();
     _restoreMnemonicController.dispose();
     _contactUriController.dispose();
     _seedLinkController.dispose();
@@ -234,6 +287,58 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
     });
   }
 
+  Future<void> _handleElectAndConnectNode() async {
+    final UserIdentity? identity = _currentIdentity;
+    if (identity == null) {
+      setState(() {
+        _statusMessage = 'Gere ou restaure sua identidade antes de conectar ao No gRPC.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isBusy = true;
+      _statusMessage = null;
+    });
+
+    try {
+      final int portToUse = widget.testNodePortOverride ?? 443;
+      final NodeLatencyResult? winner = await _discoveryService.selectFastestNode();
+      if (winner == null) {
+        if (!mounted) return;
+        setState(() {
+          _statusMessage = 'Nenhum No candidato respondeu ao teste de latencia TCP.';
+        });
+        return;
+      }
+
+      final RegisterSessionResponseProto reg = await _nodeClient.connectAndAuthenticate(
+        nodeHost: winner.nodeAddress,
+        identity: identity,
+        port: portToUse,
+        useInsecureLocalTestTransport: widget.useInsecureLocalTestTransport,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _statusMessage = reg.success
+            ? 'Conectado e autenticado no No ${winner.nodeAddress} (${winner.latencyMs}ms) — DHT + Stream E2E ativos.'
+            : 'Falha ao registrar sessao no No ${winner.nodeAddress}: ${reg.errorMessage}';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _statusMessage = 'Erro ao conectar ao No gRPC: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isBusy = false;
+        });
+      }
+    }
+  }
+
   void _openQrDialog(UserIdentity identity) {
     showDialog<void>(
       context: context,
@@ -260,6 +365,7 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
           contact: contact,
           sessionManager: _sessionManager,
           vault: _vault,
+          nodeClient: _nodeClient,
         ),
       ),
     );
@@ -530,7 +636,7 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
               const Text(
                 'Aguardando descoberta DNS SRV (_ispchat._tcp.ispchat.dev.br) ou injecao manual de seed.',
               )
-            else
+            else ...<Widget>[
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: candidates
@@ -543,6 +649,28 @@ class _IspChatHomeScreenState extends State<IspChatHomeScreen> {
                         ))
                     .toList(),
               ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: <Widget>[
+                  FilledButton.tonalIcon(
+                    key: const Key('btn_elect_and_connect_node'),
+                    onPressed: _isBusy ? null : _handleElectAndConnectNode,
+                    icon: const Icon(Icons.bolt),
+                    label: const Text('Eleger & Conectar ao Melhor No'),
+                  ),
+                  if (_nodeClient.isConnected && _nodeClient.connectedHost != null)
+                    Text(
+                      'Ativo: ${_nodeClient.connectedHost}',
+                      key: const Key('txt_connected_node_host'),
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                ],
+              ),
+            ],
           ],
         ),
       ),

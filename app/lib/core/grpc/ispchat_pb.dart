@@ -53,6 +53,44 @@ class RegisterSessionRequestProto {
     if (timestamp != 0) writer.writeField(6, PbFieldType.O6, Int64Placeholder.fromInt(timestamp));
     return writer.toBuffer();
   }
+
+  factory RegisterSessionRequestProto.fromBuffer(List<int> bytes) {
+    final CodedBufferReader reader = CodedBufferReader(bytes);
+    String userUuid = '';
+    String nodeAddress = '';
+    Uint8List publicKey = Uint8List(0);
+    Uint8List x25519PublicKey = Uint8List(0);
+    Uint8List signature = Uint8List(0);
+    int timestamp = 0;
+    while (!reader.isAtEnd()) {
+      final int tag = reader.readTag();
+      final int fieldNumber = getTagFieldNumber(tag);
+      switch (fieldNumber) {
+        case 1:
+          userUuid = reader.readString();
+        case 2:
+          nodeAddress = reader.readString();
+        case 3:
+          publicKey = Uint8List.fromList(reader.readBytes());
+        case 4:
+          x25519PublicKey = Uint8List.fromList(reader.readBytes());
+        case 5:
+          signature = Uint8List.fromList(reader.readBytes());
+        case 6:
+          timestamp = reader.readInt64().toInt();
+        default:
+          reader.skipField(tag);
+      }
+    }
+    return RegisterSessionRequestProto(
+      userUuid: userUuid,
+      nodeAddress: nodeAddress,
+      publicKey: publicKey,
+      x25519PublicKey: x25519PublicKey,
+      signature: signature,
+      timestamp: timestamp,
+    );
+  }
 }
 
 /// Espelho binario wire-compatible de `RegisterSessionResponse` (ispchat.proto).
@@ -64,6 +102,13 @@ class RegisterSessionResponseProto {
     required this.success,
     required this.errorMessage,
   });
+
+  Uint8List writeToBuffer() {
+    final CodedBufferWriter writer = CodedBufferWriter();
+    if (success) writer.writeField(1, PbFieldType.OB, success);
+    if (errorMessage.isNotEmpty) writer.writeField(2, PbFieldType.OS, errorMessage);
+    return writer.toBuffer();
+  }
 
   factory RegisterSessionResponseProto.fromBuffer(List<int> bytes) {
     final CodedBufferReader reader = CodedBufferReader(bytes);
@@ -269,6 +314,89 @@ class Int64Placeholder {
   }
 }
 
+/// Espelho binario wire-compatible de `FindUserRequest` (ispchat.proto).
+class FindUserRequestProto {
+  final String targetUuid;
+
+  const FindUserRequestProto({required this.targetUuid});
+
+  Uint8List writeToBuffer() {
+    final CodedBufferWriter writer = CodedBufferWriter();
+    if (targetUuid.isNotEmpty) writer.writeField(1, PbFieldType.OS, targetUuid);
+    return writer.toBuffer();
+  }
+
+  factory FindUserRequestProto.fromBuffer(List<int> bytes) {
+    final CodedBufferReader reader = CodedBufferReader(bytes);
+    String targetUuid = '';
+    while (!reader.isAtEnd()) {
+      final int tag = reader.readTag();
+      final int fieldNumber = getTagFieldNumber(tag);
+      switch (fieldNumber) {
+        case 1:
+          targetUuid = reader.readString();
+        default:
+          reader.skipField(tag);
+      }
+    }
+    return FindUserRequestProto(targetUuid: targetUuid);
+  }
+}
+
+/// Espelho binario wire-compatible de `FindUserResponse` (ispchat.proto).
+class FindUserResponseProto {
+  final bool found;
+  final String nodeAddress;
+  final Uint8List publicKey;
+  final Uint8List x25519PublicKey;
+
+  const FindUserResponseProto({
+    required this.found,
+    this.nodeAddress = '',
+    required this.publicKey,
+    required this.x25519PublicKey,
+  });
+
+  Uint8List writeToBuffer() {
+    final CodedBufferWriter writer = CodedBufferWriter();
+    if (found) writer.writeField(1, PbFieldType.OB, found);
+    if (nodeAddress.isNotEmpty) writer.writeField(2, PbFieldType.OS, nodeAddress);
+    if (publicKey.isNotEmpty) writer.writeField(3, PbFieldType.OY, publicKey);
+    if (x25519PublicKey.isNotEmpty) writer.writeField(4, PbFieldType.OY, x25519PublicKey);
+    return writer.toBuffer();
+  }
+
+  factory FindUserResponseProto.fromBuffer(List<int> bytes) {
+    final CodedBufferReader reader = CodedBufferReader(bytes);
+    bool found = false;
+    String nodeAddress = '';
+    Uint8List publicKey = Uint8List(0);
+    Uint8List x25519PublicKey = Uint8List(0);
+    while (!reader.isAtEnd()) {
+      final int tag = reader.readTag();
+      final int fieldNumber = getTagFieldNumber(tag);
+      switch (fieldNumber) {
+        case 1:
+          found = reader.readBool();
+        case 2:
+          nodeAddress = reader.readString();
+        case 3:
+          publicKey = Uint8List.fromList(reader.readBytes());
+        case 4:
+          x25519PublicKey = Uint8List.fromList(reader.readBytes());
+        default:
+          reader.skipField(tag);
+      }
+    }
+    return FindUserResponseProto(
+      found: found,
+      nodeAddress: nodeAddress,
+      publicKey: publicKey,
+      x25519PublicKey: x25519PublicKey,
+    );
+  }
+}
+
 /// Descritores de metodos gRPC compativeis com o servidor Java 25 (ispchat.proto).
 class IspChatGrpcMethods {
   static final ClientMethod<RegisterSessionRequestProto, RegisterSessionResponseProto>
@@ -276,6 +404,13 @@ class IspChatGrpcMethods {
     '/br.dev.ispchat.grpc.DhtClientService/RegisterSession',
     (RegisterSessionRequestProto req) => req.writeToBuffer(),
     (List<int> res) => RegisterSessionResponseProto.fromBuffer(res),
+  );
+
+  static final ClientMethod<FindUserRequestProto, FindUserResponseProto> findUser =
+      ClientMethod<FindUserRequestProto, FindUserResponseProto>(
+    '/br.dev.ispchat.grpc.DhtClientService/FindUser',
+    (FindUserRequestProto req) => req.writeToBuffer(),
+    (List<int> res) => FindUserResponseProto.fromBuffer(res),
   );
 
   static final ClientMethod<ClientEnvelopeProto, ServerEnvelopeProto> connectStream =

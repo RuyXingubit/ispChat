@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart' show ByteData, rootBundle;
 import 'package:grpc/grpc.dart';
 
 import '../crypto/identity_crypto_service.dart';
@@ -12,6 +13,7 @@ class IspChatNodeClient {
   final E2eSessionManager sessionManager;
 
   ClientChannel? _channel;
+  String? _connectedHost;
   StreamController<ClientEnvelopeProto>? _outgoingController;
   StreamSubscription<ServerEnvelopeProto>? _incomingSubscription;
   final StreamController<DecryptedIncomingEvent> _decryptedEventsController =
@@ -27,6 +29,18 @@ class IspChatNodeClient {
 
   bool get isConnected => _channel != null && _outgoingController != null;
 
+  String? get connectedHost => _connectedHost;
+
+  /// Carrega o certificado da CA oficial embutido nos assets (`assets/certs/ca.crt`).
+  Future<List<int>?> _loadBundledCaCert() async {
+    try {
+      final ByteData data = await rootBundle.load('assets/certs/ca.crt');
+      return data.buffer.asUint8List();
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Conecta ao No ISP na porta 443 TLS, registra a sessao na DHT Kademlia
   /// e abre a stream bidirecional enviando imediatamente o pacote `AUTH_HANDSHAKE`.
   Future<RegisterSessionResponseProto> connectAndAuthenticate({
@@ -35,15 +49,21 @@ class IspChatNodeClient {
     int port = 443,
     List<int>? trustedCaCertificateBytes,
     String? authorityOverride,
+    bool useInsecureLocalTestTransport = false,
   }) async {
     await disconnect();
 
-    final ChannelCredentials credentials = trustedCaCertificateBytes != null
-        ? ChannelCredentials.secure(
-            certificates: trustedCaCertificateBytes,
-            authority: authorityOverride,
-          )
-        : const ChannelCredentials.secure();
+    final List<int>? caBytes = trustedCaCertificateBytes ??
+        (useInsecureLocalTestTransport ? null : await _loadBundledCaCert());
+
+    final ChannelCredentials credentials = useInsecureLocalTestTransport
+        ? const ChannelCredentials.insecure()
+        : (caBytes != null
+            ? ChannelCredentials.secure(
+                certificates: caBytes,
+                authority: authorityOverride,
+              )
+            : const ChannelCredentials.secure());
 
     final ClientChannel channel = ClientChannel(
       nodeHost,
@@ -83,6 +103,8 @@ class IspChatNodeClient {
       return regResponse;
     }
 
+    _connectedHost = nodeAddress;
+
     // Abre a stream bidirecional ClientStreamService/Connect
     final StreamController<ClientEnvelopeProto> outController =
         StreamController<ClientEnvelopeProto>();
@@ -116,6 +138,33 @@ class IspChatNodeClient {
     return regResponse;
   }
 
+  /// Consulta a localizacao atual e chaves publicas de um usuario na DHT Kademlia.
+  Future<FindUserResponseProto> findUserInDht(String targetUuid) async {
+    final ClientChannel? channel = _channel;
+    if (channel == null) {
+      throw StateError('Canal gRPC nao esta conectado ao No do provedor.');
+    }
+
+    final FindUserRequestProto req = FindUserRequestProto(targetUuid: targetUuid);
+    final ClientCall<FindUserRequestProto, FindUserResponseProto> call = channel.createCall(
+      IspChatGrpcMethods.findUser,
+      Stream<FindUserRequestProto>.value(req),
+      CallOptions(timeout: const Duration(seconds: 5)),
+    );
+    return call.response.single;
+  }
+
+  /// Envia um `ClientEnvelopeProto` ja assinado e criptografado pela stream gRPC ativa.
+  /// Retorna `true` se foi despachado na rede em tempo real, ou `false` se estiver offline.
+  bool sendSignedEnvelope(ClientEnvelopeProto envelope) {
+    final StreamController<ClientEnvelopeProto>? out = _outgoingController;
+    if (out == null || out.isClosed) {
+      return false;
+    }
+    out.add(envelope);
+    return true;
+  }
+
   /// Envia uma mensagem de texto E2E ou sinalizacao WebRTC pela stream ativa.
   Future<void> sendEncryptedEvent({
     required UserIdentity senderIdentity,
@@ -141,6 +190,7 @@ class IspChatNodeClient {
 
   /// Encerra a stream e fecha o canal gRPC.
   Future<void> disconnect() async {
+    _connectedHost = null;
     await _incomingSubscription?.cancel();
     _incomingSubscription = null;
 
