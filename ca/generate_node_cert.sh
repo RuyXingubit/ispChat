@@ -26,6 +26,12 @@ openssl req -new -key "$NODE_NAME.key" -out "$NODE_NAME.csr" \
     -subj "/C=BR/ST=SP/L=Sao Paulo/O=ispChat Node/OU=Routing/CN=$NODE_NAME"
 
 echo "Criando arquivo de extensão temporário para SAN e mTLS (serverAuth + clientAuth)..."
+if [[ "$NODE_SAN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$NODE_SAN" == *:* ]]; then
+    SAN_ENTRY="IP.1 = $NODE_SAN"
+else
+    SAN_ENTRY="DNS.1 = $NODE_SAN"
+fi
+
 cat > extfile.cnf << EOF
 authorityKeyIdentifier=keyid,issuer
 basicConstraints=CA:FALSE
@@ -34,17 +40,14 @@ extendedKeyUsage = serverAuth, clientAuth
 subjectAltName = @alt_names
 
 [alt_names]
-IP.1 = $NODE_SAN
-DNS.1 = $NODE_SAN
+$SAN_ENTRY
 DNS.2 = localhost
 IP.2 = 127.0.0.1
 EOF
 
 echo "Gerando Certificado Assinado do Nó ($NODE_NAME.crt)..."
-# Ignora erro de IP mal formatado caso o SAN seja um domínio
 openssl x509 -req -in "$NODE_NAME.csr" -CA ca.crt -CAkey ca.key -CAcreateserial \
-    -out "$NODE_NAME.crt" -days 365 -sha256 -extfile extfile.cnf || \
-    (sed -i '' 's/IP.1/DNS.3/g' extfile.cnf && openssl x509 -req -in "$NODE_NAME.csr" -CA ca.crt -CAkey ca.key -CAcreateserial -out "$NODE_NAME.crt" -days 365 -sha256 -extfile extfile.cnf)
+    -out "$NODE_NAME.crt" -days 365 -sha256 -extfile extfile.cnf
 
 rm extfile.cnf
 
