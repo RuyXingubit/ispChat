@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:app/core/crypto/identity_crypto_service.dart';
 import 'package:app/core/grpc/ispchat_node_client.dart';
@@ -29,13 +28,13 @@ class _FakeDhtClientService extends grpc.Service {
       (List<int> value) => RegisterSessionRequestProto.fromBuffer(value),
       (RegisterSessionResponseProto value) => value.writeToBuffer(),
     ));
-    $addMethod(grpc.ServiceMethod<FindUserRequestProto, FindUserResponseProto>(
-      'FindUser',
-      findUser,
+    $addMethod(grpc.ServiceMethod<FindUserSessionsRequestProto, FindUserSessionsResponseProto>(
+      'FindUserSessions',
+      findUserSessions,
       false,
       false,
-      (List<int> value) => FindUserRequestProto.fromBuffer(value),
-      (FindUserResponseProto value) => value.writeToBuffer(),
+      (List<int> value) => FindUserSessionsRequestProto.fromBuffer(value),
+      (FindUserSessionsResponseProto value) => value.writeToBuffer(),
     ));
   }
 
@@ -51,24 +50,25 @@ class _FakeDhtClientService extends grpc.Service {
     );
   }
 
-  Future<FindUserResponseProto> findUser(
+  Future<FindUserSessionsResponseProto> findUserSessions(
     grpc.ServiceCall call,
-    Future<FindUserRequestProto> requestFuture,
+    Future<FindUserSessionsRequestProto> requestFuture,
   ) async {
-    final FindUserRequestProto request = await requestFuture;
+    final FindUserSessionsRequestProto request = await requestFuture;
     final RegisterSessionRequestProto? found = registeredUsers[request.targetUuid];
     if (found == null) {
-      return FindUserResponseProto(
-        found: false,
-        publicKey: Uint8List(0),
-        x25519PublicKey: Uint8List(0),
-      );
+      return const FindUserSessionsResponseProto();
     }
-    return FindUserResponseProto(
-      found: true,
-      nodeAddress: found.nodeAddress,
-      publicKey: found.publicKey,
-      x25519PublicKey: found.x25519PublicKey,
+    return FindUserSessionsResponseProto(
+      nodeAddresses: <String>[found.nodeAddress],
+      sessions: <UserSessionInfoProto>[
+        UserSessionInfoProto(
+          nodeAddress: found.nodeAddress,
+          ed25519PublicKey: found.publicKey,
+          x25519PublicKey: found.x25519PublicKey,
+          timestamp: found.timestamp,
+        ),
+      ],
     );
   }
 }
@@ -249,11 +249,14 @@ void main() {
           expect(handshake.senderUuid, equals(alice.userUuid));
           expect(handshake.receiverUuid, equals(alice.userUuid));
 
-          // 2. Consulta FindUser na DHT para a sessao recem-registrada da Alice
-          final FindUserResponseProto foundAlice =
-              await aliceClient.findUserInDht(alice.userUuid);
+          // 2. Consulta FindUserSessions na DHT para a sessao recem-registrada da Alice
+          final FindUserSessionsResponseProto foundAlice =
+              await aliceClient.findUserSessionsInDht(alice.userUuid);
           expect(foundAlice.found, isTrue);
-          expect(foundAlice.publicKey, equals(alice.ed25519PublicKeyBytes));
+          expect(
+            foundAlice.sessions.single.ed25519PublicKey,
+            equals(alice.ed25519PublicKeyBytes),
+          );
 
           // 3. Alice envia mensagem E2E para Bob pela stream gRPC ativa
           await aliceClient.sendEncryptedEvent(

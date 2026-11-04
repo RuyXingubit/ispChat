@@ -40,6 +40,31 @@ void main() {
     expect(decoded.senderPublicKey, equals(alice.ed25519PublicKeyBytes));
     expect(decoded.signature, equals(handshake.signature));
     expect(decoded.timestamp, equals(1762128000000));
+
+    // Valida serializacao wire de FindUserSessionsRequestProto e FindUserSessionsResponseProto
+    final FindUserSessionsRequestProto findReq =
+        FindUserSessionsRequestProto(targetUuid: alice.userUuid);
+    final FindUserSessionsRequestProto decodedFindReq =
+        FindUserSessionsRequestProto.fromBuffer(findReq.writeToBuffer());
+    expect(decodedFindReq.targetUuid, equals(alice.userUuid));
+
+    final FindUserSessionsResponseProto findRes = FindUserSessionsResponseProto(
+      nodeAddresses: const <String>['node1.isp.dev.br:443'],
+      sessions: <UserSessionInfoProto>[
+        UserSessionInfoProto(
+          nodeAddress: 'node1.isp.dev.br:443',
+          ed25519PublicKey: alice.ed25519PublicKeyBytes,
+          x25519PublicKey: alice.x25519PublicKeyBytes,
+          timestamp: 1762128000000,
+        ),
+      ],
+    );
+    final FindUserSessionsResponseProto decodedFindRes =
+        FindUserSessionsResponseProto.fromBuffer(findRes.writeToBuffer());
+    expect(decodedFindRes.found, isTrue);
+    expect(decodedFindRes.nodeAddresses, equals(<String>['node1.isp.dev.br:443']));
+    expect(decodedFindRes.sessions.single.ed25519PublicKey, equals(alice.ed25519PublicKeyBytes));
+    expect(decodedFindRes.sessions.single.x25519PublicKey, equals(alice.x25519PublicKeyBytes));
   });
 
   test('Deve completar fluxo E2E de texto e sinalizacao WebRTC entre Alice e Bob apos troca de Link Magico', () async {

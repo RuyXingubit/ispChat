@@ -26,7 +26,7 @@ Esta regra definida pela Liderança Técnica é a base inegociável do desenvolv
 ### 2.2. Testes de Integração
 - **Fila Offline (Store and Forward):**
   - Simular envio de texto E2E para um `UUIDv7` offline. Validar persistência na `Redis List`. Conectar o cliente enviando `AUTH_HANDSHAKE` e verificar o descarregamento e limpeza imediata da fila.
-- **Broadcast Multi-dispositivo (Redis Pub/Sub):**
+- **Broadcast Multi-dispositivo (`LocalSessionRegistry` + Roteamento Federado):**
   - Registrar 2 ou mais sessões ativas para o mesmo `UUIDv7` e verificar o disparo simultâneo de chamada (`RING`) e mensagens para todas as streams abertas.
 
 ### 2.3. Testes End-to-End (E2E)

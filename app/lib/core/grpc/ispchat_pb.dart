@@ -314,11 +314,11 @@ class Int64Placeholder {
   }
 }
 
-/// Espelho binario wire-compatible de `FindUserRequest` (ispchat.proto).
-class FindUserRequestProto {
+/// Espelho binario wire-compatible de `FindUserSessionsRequest` (ispchat.proto).
+class FindUserSessionsRequestProto {
   final String targetUuid;
 
-  const FindUserRequestProto({required this.targetUuid});
+  const FindUserSessionsRequestProto({required this.targetUuid});
 
   Uint8List writeToBuffer() {
     final CodedBufferWriter writer = CodedBufferWriter();
@@ -326,7 +326,7 @@ class FindUserRequestProto {
     return writer.toBuffer();
   }
 
-  factory FindUserRequestProto.fromBuffer(List<int> bytes) {
+  factory FindUserSessionsRequestProto.fromBuffer(List<int> bytes) {
     final CodedBufferReader reader = CodedBufferReader(bytes);
     String targetUuid = '';
     while (!reader.isAtEnd()) {
@@ -339,60 +339,106 @@ class FindUserRequestProto {
           reader.skipField(tag);
       }
     }
-    return FindUserRequestProto(targetUuid: targetUuid);
+    return FindUserSessionsRequestProto(targetUuid: targetUuid);
   }
 }
 
-/// Espelho binario wire-compatible de `FindUserResponse` (ispchat.proto).
-class FindUserResponseProto {
-  final bool found;
+/// Espelho binario wire-compatible de `UserSessionInfo` (ispchat.proto).
+class UserSessionInfoProto {
   final String nodeAddress;
-  final Uint8List publicKey;
+  final Uint8List ed25519PublicKey;
   final Uint8List x25519PublicKey;
+  final int timestamp;
 
-  const FindUserResponseProto({
-    required this.found,
-    this.nodeAddress = '',
-    required this.publicKey,
+  const UserSessionInfoProto({
+    required this.nodeAddress,
+    required this.ed25519PublicKey,
     required this.x25519PublicKey,
+    required this.timestamp,
   });
 
   Uint8List writeToBuffer() {
     final CodedBufferWriter writer = CodedBufferWriter();
-    if (found) writer.writeField(1, PbFieldType.OB, found);
-    if (nodeAddress.isNotEmpty) writer.writeField(2, PbFieldType.OS, nodeAddress);
-    if (publicKey.isNotEmpty) writer.writeField(3, PbFieldType.OY, publicKey);
-    if (x25519PublicKey.isNotEmpty) writer.writeField(4, PbFieldType.OY, x25519PublicKey);
+    if (nodeAddress.isNotEmpty) writer.writeField(1, PbFieldType.OS, nodeAddress);
+    if (ed25519PublicKey.isNotEmpty) writer.writeField(2, PbFieldType.OY, ed25519PublicKey);
+    if (x25519PublicKey.isNotEmpty) writer.writeField(3, PbFieldType.OY, x25519PublicKey);
+    if (timestamp != 0) writer.writeField(4, PbFieldType.O6, Int64Placeholder.fromInt(timestamp));
     return writer.toBuffer();
   }
 
-  factory FindUserResponseProto.fromBuffer(List<int> bytes) {
+  factory UserSessionInfoProto.fromBuffer(List<int> bytes) {
     final CodedBufferReader reader = CodedBufferReader(bytes);
-    bool found = false;
     String nodeAddress = '';
-    Uint8List publicKey = Uint8List(0);
+    Uint8List ed25519PublicKey = Uint8List(0);
     Uint8List x25519PublicKey = Uint8List(0);
+    int timestamp = 0;
     while (!reader.isAtEnd()) {
       final int tag = reader.readTag();
       final int fieldNumber = getTagFieldNumber(tag);
       switch (fieldNumber) {
         case 1:
-          found = reader.readBool();
-        case 2:
           nodeAddress = reader.readString();
+        case 2:
+          ed25519PublicKey = Uint8List.fromList(reader.readBytes());
         case 3:
-          publicKey = Uint8List.fromList(reader.readBytes());
-        case 4:
           x25519PublicKey = Uint8List.fromList(reader.readBytes());
+        case 4:
+          timestamp = reader.readInt64().toInt();
         default:
           reader.skipField(tag);
       }
     }
-    return FindUserResponseProto(
-      found: found,
+    return UserSessionInfoProto(
       nodeAddress: nodeAddress,
-      publicKey: publicKey,
+      ed25519PublicKey: ed25519PublicKey,
       x25519PublicKey: x25519PublicKey,
+      timestamp: timestamp,
+    );
+  }
+}
+
+/// Espelho binario wire-compatible de `FindUserSessionsResponse` (ispchat.proto).
+class FindUserSessionsResponseProto {
+  final List<String> nodeAddresses;
+  final List<UserSessionInfoProto> sessions;
+
+  const FindUserSessionsResponseProto({
+    this.nodeAddresses = const <String>[],
+    this.sessions = const <UserSessionInfoProto>[],
+  });
+
+  bool get found => sessions.isNotEmpty || nodeAddresses.isNotEmpty;
+
+  Uint8List writeToBuffer() {
+    final CodedBufferWriter writer = CodedBufferWriter();
+    for (final String addr in nodeAddresses) {
+      writer.writeField(1, PbFieldType.OS, addr);
+    }
+    for (final UserSessionInfoProto session in sessions) {
+      writer.writeField(2, PbFieldType.OY, session.writeToBuffer());
+    }
+    return writer.toBuffer();
+  }
+
+  factory FindUserSessionsResponseProto.fromBuffer(List<int> bytes) {
+    final CodedBufferReader reader = CodedBufferReader(bytes);
+    final List<String> nodeAddresses = <String>[];
+    final List<UserSessionInfoProto> sessions = <UserSessionInfoProto>[];
+    while (!reader.isAtEnd()) {
+      final int tag = reader.readTag();
+      final int fieldNumber = getTagFieldNumber(tag);
+      switch (fieldNumber) {
+        case 1:
+          nodeAddresses.add(reader.readString());
+        case 2:
+          sessions.add(UserSessionInfoProto.fromBuffer(reader.readBytes()));
+        default:
+          reader.skipField(tag);
+      }
+    }
+    return FindUserSessionsResponseProto(
+      nodeAddresses: nodeAddresses,
+      sessions: sessions,
     );
   }
 }
@@ -406,11 +452,12 @@ class IspChatGrpcMethods {
     (List<int> res) => RegisterSessionResponseProto.fromBuffer(res),
   );
 
-  static final ClientMethod<FindUserRequestProto, FindUserResponseProto> findUser =
-      ClientMethod<FindUserRequestProto, FindUserResponseProto>(
-    '/br.dev.ispchat.grpc.DhtClientService/FindUser',
-    (FindUserRequestProto req) => req.writeToBuffer(),
-    (List<int> res) => FindUserResponseProto.fromBuffer(res),
+  static final ClientMethod<FindUserSessionsRequestProto, FindUserSessionsResponseProto>
+      findUserSessions =
+      ClientMethod<FindUserSessionsRequestProto, FindUserSessionsResponseProto>(
+    '/br.dev.ispchat.grpc.DhtClientService/FindUserSessions',
+    (FindUserSessionsRequestProto req) => req.writeToBuffer(),
+    (List<int> res) => FindUserSessionsResponseProto.fromBuffer(res),
   );
 
   static final ClientMethod<ClientEnvelopeProto, ServerEnvelopeProto> connectStream =

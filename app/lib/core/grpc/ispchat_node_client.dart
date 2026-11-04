@@ -138,17 +138,19 @@ class IspChatNodeClient {
     return regResponse;
   }
 
-  /// Consulta a localizacao atual e chaves publicas de um usuario na DHT Kademlia.
-  Future<FindUserResponseProto> findUserInDht(String targetUuid) async {
+  /// Consulta as sessoes ativas e chaves publicas de um usuario na DHT Kademlia (`FindUserSessions`).
+  Future<FindUserSessionsResponseProto> findUserSessionsInDht(String targetUuid) async {
     final ClientChannel? channel = _channel;
     if (channel == null) {
       throw StateError('Canal gRPC nao esta conectado ao No do provedor.');
     }
 
-    final FindUserRequestProto req = FindUserRequestProto(targetUuid: targetUuid);
-    final ClientCall<FindUserRequestProto, FindUserResponseProto> call = channel.createCall(
-      IspChatGrpcMethods.findUser,
-      Stream<FindUserRequestProto>.value(req),
+    final FindUserSessionsRequestProto req =
+        FindUserSessionsRequestProto(targetUuid: targetUuid);
+    final ClientCall<FindUserSessionsRequestProto, FindUserSessionsResponseProto> call =
+        channel.createCall(
+      IspChatGrpcMethods.findUserSessions,
+      Stream<FindUserSessionsRequestProto>.value(req),
       CallOptions(timeout: const Duration(seconds: 5)),
     );
     return call.response.single;

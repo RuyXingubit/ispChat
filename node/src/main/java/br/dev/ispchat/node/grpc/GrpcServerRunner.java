@@ -20,6 +20,7 @@ import javax.net.ssl.SSLException;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.Executors;
 
 /**
  * Inicializador do servidor gRPC unificado na porta 443 com TLS 1.3 (ClientAuth.OPTIONAL)
@@ -64,6 +65,7 @@ public class GrpcServerRunner {
         SslContext sslContext = buildServerSslContext(caCert, nodeCert, nodeKey);
 
         NettyServerBuilder builder = NettyServerBuilder.forPort(port)
+                .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .sslContext(sslContext);
 
         for (BindableService service : grpcServices) {

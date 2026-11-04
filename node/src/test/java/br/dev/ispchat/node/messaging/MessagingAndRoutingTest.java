@@ -291,7 +291,7 @@ class MessagingAndRoutingTest {
             }
             assertEquals(1, registryB.getActiveDeviceCount(bobUuid));
 
-            // Alice abre stream no No A e envia mensagem E2E para Bob
+            // Alice abre stream no No A, autentica com AUTH_HANDSHAKE e envia mensagem E2E para Bob
             ClientStreamServiceGrpc.ClientStreamServiceStub aliceAsyncStub = ClientStreamServiceGrpc.newStub(aliceChannelToA);
             StreamObserver<ClientEnvelope> aliceStream = aliceAsyncStub.connect(new StreamObserver<>() {
                 @Override
@@ -301,6 +301,9 @@ class MessagingAndRoutingTest {
                 @Override
                 public void onCompleted() {}
             });
+
+            aliceStream.onNext(buildSignedEnvelope(cryptoService, aliceKeys, alicePub, aliceUuid, aliceUuid,
+                    cryptoService.generateTemporalUuidV7().toString(), MessageType.AUTH_HANDSHAKE, new byte[0]));
 
             String msgId = cryptoService.generateTemporalUuidV7().toString();
             byte[] encryptedPayload = "mensagem-secreta-inter-provedores".getBytes(StandardCharsets.UTF_8);
@@ -375,6 +378,57 @@ class MessagingAndRoutingTest {
         assertInstanceOf(StatusRuntimeException.class, capturedError.get());
         assertEquals(Status.Code.UNAUTHENTICATED, ((StatusRuntimeException) capturedError.get()).getStatus().getCode());
         assertEquals(0, sessionRegistry.getActiveDeviceCount(fakeVictimUuid));
+
+        channelPool.shutdownAll();
+    }
+
+    @Test
+    @DisplayName("Seguranca da Stream: Deve rejeitar com UNAUTHENTICATED se o primeiro pacote nao for AUTH_HANDSHAKE")
+    void shouldRejectInitialStreamPacketWhenNotAuthHandshake() throws Exception {
+        Clock fixedClock = Clock.fixed(Instant.ofEpochMilli(FIXED_NOW_MILLIS), ZoneOffset.UTC);
+        CryptoService cryptoService = new CryptoService(fixedClock);
+        LocalSessionRegistry sessionRegistry = new LocalSessionRegistry();
+        OfflineMessageQueueService offlineQueue = new OfflineMessageQueueService();
+        KademliaRoutingTable routingTable = new KademliaRoutingTable("01950000-0000-7000-8000-000000000001");
+        DhtStoreService dhtStore = new DhtStoreService(cryptoService);
+        GrpcChannelPool channelPool = new GrpcChannelPool(true, "../ca/ca.crt", "../ca/dev-node.crt", "../ca/dev-node.key");
+
+        MessageRouterService routerService = new MessageRouterService(
+                sessionRegistry, offlineQueue, dhtStore, routingTable, channelPool, cryptoService);
+        ClientStreamGrpcService streamService = new ClientStreamGrpcService(
+                cryptoService, sessionRegistry, offlineQueue, routerService);
+
+        AtomicReference<Throwable> capturedError = new AtomicReference<>();
+        CountDownLatch errorLatch = new CountDownLatch(1);
+
+        StreamObserver<ClientEnvelope> clientStream = streamService.connect(new StreamObserver<>() {
+            @Override
+            public void onNext(ServerEnvelope value) {}
+            @Override
+            public void onError(Throwable t) {
+                capturedError.set(t);
+                errorLatch.countDown();
+            }
+            @Override
+            public void onCompleted() {}
+        });
+
+        KeyPair aliceKeys = KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
+        byte[] alicePub = extractRaw32BytePublicKey(aliceKeys);
+        String aliceUuid = cryptoService.deriveIdentityUuidV7(alicePub).toString();
+        String bobUuid = "01950000-0000-7000-8000-000000000099";
+
+        ClientEnvelope prematureText = buildSignedEnvelope(
+                cryptoService, aliceKeys, alicePub, aliceUuid, bobUuid,
+                cryptoService.generateTemporalUuidV7().toString(),
+                MessageType.TEXT, "sem-handshake".getBytes(StandardCharsets.UTF_8));
+
+        clientStream.onNext(prematureText);
+
+        assertTrue(errorLatch.await(2, TimeUnit.SECONDS));
+        assertInstanceOf(StatusRuntimeException.class, capturedError.get());
+        assertEquals(Status.Code.UNAUTHENTICATED, ((StatusRuntimeException) capturedError.get()).getStatus().getCode());
+        assertEquals(0, sessionRegistry.getActiveDeviceCount(aliceUuid));
 
         channelPool.shutdownAll();
     }

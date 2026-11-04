@@ -74,9 +74,20 @@ public class ClientStreamGrpcService extends ClientStreamServiceGrpc.ClientStrea
                 }
 
                 String normalizedSender = envelope.getSenderUuid().trim().toLowerCase();
+                String normalizedReceiver = envelope.getReceiverUuid().trim().toLowerCase();
                 String currentBoundUuid = authenticatedUserUuid.get();
 
                 if (currentBoundUuid == null) {
+                    if (envelope.getType() != MessageType.AUTH_HANDSHAKE
+                            || !normalizedSender.equals(normalizedReceiver)) {
+                        log.warn("Primeiro pacote da stream deve ser AUTH_HANDSHAKE auto-enderecado (sender={}, receiver={}, type={})",
+                                normalizedSender, normalizedReceiver, envelope.getType());
+                        responseObserver.onError(Status.UNAUTHENTICATED
+                                .withDescription("O primeiro pacote da stream deve ser AUTH_HANDSHAKE com sender_uuid == receiver_uuid")
+                                .asRuntimeException());
+                        cleanupStream();
+                        return;
+                    }
                     if (authenticatedUserUuid.compareAndSet(null, normalizedSender)) {
                         localSessionRegistry.registerStream(normalizedSender, responseObserver);
                         drainOfflineMessagesToStream(normalizedSender, responseObserver);
