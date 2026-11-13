@@ -28,5 +28,9 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Necessario para chamadas de video criptografadas E2E via WebRTC.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Necessario para chamadas de voz e video criptografadas E2E via WebRTC.</string>
 </dict>
 </plist>

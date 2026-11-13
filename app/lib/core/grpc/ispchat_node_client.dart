@@ -1,213 +1,335 @@
 import 'dart:async';
-import 'dart:typed_data';
 
-import 'package:flutter/services.dart' show ByteData, rootBundle;
+import 'package:fixnum/fixnum.dart' as $fixnum;
 import 'package:grpc/grpc.dart';
+import 'package:app/core/config/network_bootstrap_config.dart';
+import 'package:app/core/discovery/tcp_latency_probe.dart';
+import 'package:app/core/grpc/generated/ispchat.pbgrpc.dart';
 
-import '../crypto/identity_crypto_service.dart';
-import '../messaging/e2e_session_manager.dart';
-import 'ispchat_pb.dart';
-
-/// Cliente gRPC de borda do App Flutter para comunicacao com o No do Provedor na porta 443 TLS.
+/// gRPC transport client for Edge/Home Nodes (`DhtClient`, `ClientStream`,
+/// `TurnCredential`, `Directory`) and Principal Governance RPCs, with
+/// exponential reconnect backoff (`1s -> 30s`).
 class IspChatNodeClient {
-  final E2eSessionManager sessionManager;
+  final NetworkBootstrapConfig bootstrapConfig;
+  final Duration defaultCallTimeout;
 
-  ClientChannel? _channel;
-  String? _connectedHost;
-  StreamController<ClientEnvelopeProto>? _outgoingController;
-  StreamSubscription<ServerEnvelopeProto>? _incomingSubscription;
-  final StreamController<DecryptedIncomingEvent> _decryptedEventsController =
-      StreamController<DecryptedIncomingEvent>.broadcast();
+  ClientChannel? _edgeChannel;
+  ClientChannel? _principalChannel;
+  String? _connectedAddress;
+  String? _principalAddress;
+
+  StreamController<ClientEnvelope>? _outgoingController;
+  StreamSubscription<ServerEnvelope>? _incomingSub;
+  final StreamController<ServerEnvelope> _incomingBroadcast =
+      StreamController<ServerEnvelope>.broadcast();
+
+  bool _manualDisconnect = false;
+  bool _streamActive = false;
+  int _reconnectAttempt = 0;
+  Timer? _reconnectTimer;
+  Future<void> Function()? _onReconnected;
 
   IspChatNodeClient({
-    required this.sessionManager,
+    this.bootstrapConfig = const NetworkBootstrapConfig(),
+    this.defaultCallTimeout = const Duration(seconds: 15),
   });
 
-  /// Stream de eventos recebidos, ja filtrados pela Blocklist Local,
-  /// verificados com Ed25519 e descriptografados E2E com X25519.
-  Stream<DecryptedIncomingEvent> get incomingEvents => _decryptedEventsController.stream;
+  bool get isConnected => _edgeChannel != null;
+  String? get connectedNodeAddress => _connectedAddress;
+  Stream<ServerEnvelope> get incomingEnvelopes => _incomingBroadcast.stream;
 
-  bool get isConnected => _channel != null && _outgoingController != null;
-
-  String? get connectedHost => _connectedHost;
-
-  /// Carrega o certificado da CA oficial embutido nos assets (`assets/certs/ca.crt`).
-  Future<List<int>?> _loadBundledCaCert() async {
-    try {
-      final ByteData data = await rootBundle.load('assets/certs/ca.crt');
-      return data.buffer.asUint8List();
-    } catch (_) {
-      return null;
-    }
+  CallOptions _callOptions([Duration? timeout]) {
+    return CallOptions(timeout: timeout ?? defaultCallTimeout);
   }
 
-  /// Conecta ao No ISP na porta 443 TLS, registra a sessao na DHT Kademlia
-  /// e abre a stream bidirecional enviando imediatamente o pacote `AUTH_HANDSHAKE`.
-  Future<RegisterSessionResponseProto> connectAndAuthenticate({
-    required String nodeHost,
-    required UserIdentity identity,
-    int port = 443,
-    List<int>? trustedCaCertificateBytes,
-    String? authorityOverride,
-    bool useInsecureLocalTestTransport = false,
+  /// Connects using an `"host:port"` or `"[ipv6]:port"` endpoint string.
+  Future<void> connectToAddress(
+    String nodeAddress, {
+    bool useTls = true,
+    ChannelCredentials? tlsCredentials,
+    String? principalAddress,
+    bool routeGovernanceThroughEdgeChannel = false,
+  }) async {
+    final parsed = TcpLatencyProbe.parseHostAndPort(nodeAddress.trim());
+    await connect(
+      host: parsed.host,
+      port: parsed.port,
+      useTls: useTls,
+      tlsCredentials: tlsCredentials,
+      principalAddress: principalAddress,
+      routeGovernanceThroughEdgeChannel: routeGovernanceThroughEdgeChannel,
+      displayAddress: nodeAddress.trim(),
+    );
+  }
+
+  /// Connects to an explicit `(host, port)` pair (preserves TLS by default).
+  Future<void> connect({
+    required String host,
+    required int port,
+    bool useTls = true,
+    ChannelCredentials? tlsCredentials,
+    String? principalAddress,
+    bool routeGovernanceThroughEdgeChannel = false,
+    String? displayAddress,
   }) async {
     await disconnect();
+    _manualDisconnect = false;
+    _connectedAddress = displayAddress ??
+        (host.contains(':') && !host.startsWith('[')
+            ? '[$host]:$port'
+            : '$host:$port');
 
-    final List<int>? caBytes = trustedCaCertificateBytes ??
-        (useInsecureLocalTestTransport ? null : await _loadBundledCaCert());
+    final creds = useTls
+        ? (tlsCredentials ?? const ChannelCredentials.secure())
+        : const ChannelCredentials.insecure();
 
-    final ChannelCredentials credentials = useInsecureLocalTestTransport
-        ? const ChannelCredentials.insecure()
-        : (caBytes != null
-            ? ChannelCredentials.secure(
-                certificates: caBytes,
-                authority: authorityOverride,
-              )
-            : const ChannelCredentials.secure());
-
-    final ClientChannel channel = ClientChannel(
-      nodeHost,
+    _edgeChannel = ClientChannel(
+      host,
       port: port,
-      options: ChannelOptions(credentials: credentials),
-    );
-    _channel = channel;
-
-    final int nowMillis = DateTime.now().millisecondsSinceEpoch;
-    final String nodeAddress = port == 443 ? nodeHost : '$nodeHost:$port';
-
-    final Uint8List dhtSignature = await sessionManager.cryptoService.signDhtRegistration(
-      identity: identity,
-      nodeAddress: nodeAddress,
-      timestampMillis: nowMillis,
+      options: ChannelOptions(credentials: creds),
     );
 
-    final RegisterSessionRequestProto regRequest = RegisterSessionRequestProto(
-      userUuid: identity.userUuid,
-      nodeAddress: nodeAddress,
-      publicKey: identity.ed25519PublicKeyBytes,
-      x25519PublicKey: identity.x25519PublicKeyBytes,
-      signature: dhtSignature,
-      timestamp: nowMillis,
-    );
+    if (routeGovernanceThroughEdgeChannel) {
+      _principalChannel = _edgeChannel;
+      _principalAddress = _connectedAddress;
+    } else {
+      final targetPrincipal =
+          (principalAddress ?? bootstrapConfig.principalFallbackAddress).trim();
+      if (targetPrincipal.isNotEmpty) {
+        try {
+          final pParsed = TcpLatencyProbe.parseHostAndPort(targetPrincipal);
+          _principalAddress = targetPrincipal;
+          _principalChannel = ClientChannel(
+            pParsed.host,
+            port: pParsed.port,
+            options: ChannelOptions(credentials: creds),
+          );
+        } catch (_) {}
+      }
+    }
+  }
 
-    final ClientCall<RegisterSessionRequestProto, RegisterSessionResponseProto> regCall =
-        channel.createCall(
-      IspChatGrpcMethods.registerSession,
-      Stream<RegisterSessionRequestProto>.value(regRequest),
-      CallOptions(timeout: const Duration(seconds: 5)),
-    );
+  ClientChannel get _requireEdge {
+    final ch = _edgeChannel;
+    if (ch == null) {
+      throw StateError('IspChatNodeClient is not connected to an edge node.');
+    }
+    return ch;
+  }
 
-    final RegisterSessionResponseProto regResponse = await regCall.response.single;
-    if (!regResponse.success) {
-      await disconnect();
-      return regResponse;
+  ClientChannel get _requirePrincipal {
+    final ch = _principalChannel ?? _edgeChannel;
+    if (ch == null) {
+      throw StateError('No Principal or fallback governance channel available.');
+    }
+    return ch;
+  }
+
+  Future<RegisterSessionResponse> registerSession(
+    RegisterSessionRequest request,
+  ) {
+    final client = DhtClientServiceClient(_requireEdge, options: _callOptions());
+    return client.registerSession(request);
+  }
+
+  Future<FindUserSessionsResponse> findUserSessions(String targetUuid) {
+    final client = DhtClientServiceClient(_requireEdge, options: _callOptions());
+    return client.findUserSessions(
+      FindUserSessionsRequest()..targetUuid = targetUuid,
+    );
+  }
+
+  Future<TurnCredentialResponse> getTurnCredentials(
+    TurnCredentialRequest request,
+  ) {
+    final client =
+        TurnCredentialServiceClient(_requireEdge, options: _callOptions());
+    return client.getTurnCredentials(request);
+  }
+
+  Future<SearchCnpjResponse> searchVerifiedCnpj(
+    String query, {
+    int limit = 20,
+  }) {
+    final client = DirectoryServiceClient(_requireEdge, options: _callOptions());
+    return client.searchVerifiedCnpj(
+      SearchCnpjRequest()
+        ..query = query
+        ..limit = limit,
+    );
+  }
+
+  Future<VerificationBundle> submitVerification(
+    SubmitVerificationRequest request,
+  ) {
+    final client = PrincipalGovernanceServiceClient(
+      _requirePrincipal,
+      options: _callOptions(),
+    );
+    return client.submitVerification(request);
+  }
+
+  Future<VerificationBundle> submitCpfRebind(SubmitCpfRebindRequest request) {
+    final client = PrincipalGovernanceServiceClient(
+      _requirePrincipal,
+      options: _callOptions(),
+    );
+    return client.submitCpfRebind(request);
+  }
+
+  Future<VerificationBundle> getOrRenewCredential(GetCredentialRequest request) {
+    final client = PrincipalGovernanceServiceClient(
+      _requirePrincipal,
+      options: _callOptions(),
+    );
+    return client.getOrRenewCredential(request);
+  }
+
+  Future<RevocationEvent> revokeDevice(RevokeDeviceRequest request) {
+    final client = PrincipalGovernanceServiceClient(
+      _requirePrincipal,
+      options: _callOptions(),
+    );
+    return client.revokeDevice(request);
+  }
+
+  Future<VerificationBundle> portAccount(PortAccountRequest request) {
+    final client = PrincipalGovernanceServiceClient(
+      _requirePrincipal,
+      options: _callOptions(),
+    );
+    return client.portAccount(request);
+  }
+
+  Future<CollaboratorAuthCert> authorizeCollaborator(
+    AuthorizeCollaboratorRequest request,
+  ) {
+    final client = PrincipalGovernanceServiceClient(
+      _requirePrincipal,
+      options: _callOptions(),
+    );
+    return client.authorizeCollaborator(request);
+  }
+
+  Future<RevocationEvent> revokeCollaborator(
+    RevokeCollaboratorRequest request,
+  ) {
+    final client = PrincipalGovernanceServiceClient(
+      _requirePrincipal,
+      options: _callOptions(),
+    );
+    return client.revokeCollaborator(request);
+  }
+
+  Stream<RevocationEvent> streamRevocations(int sinceRevocationSeq) {
+    final client = PrincipalGovernanceServiceClient(_requirePrincipal);
+    return client.streamRevocations(
+      StreamRevocationsRequest()
+        ..sinceRevocationSeq = $fixnum.Int64(sinceRevocationSeq),
+    );
+  }
+
+  /// Opens (or reopens) the bidirectional `ClientStreamService.ConnectStream`
+  /// with automatic reconnect backoff (`1s, 2s, 4s, 8s, 16s, 30s`).
+  Future<void> openMessageStream({
+    ClientEnvelope? initialHandshake,
+    Future<void> Function()? onReconnected,
+  }) async {
+    _onReconnected = onReconnected;
+    _streamActive = true;
+    await _closeStreamOnly();
+
+    final outgoing = StreamController<ClientEnvelope>();
+    _outgoingController = outgoing;
+
+    final client = ClientStreamServiceClient(_requireEdge);
+    final responseStream = client.connect(outgoing.stream);
+
+    if (initialHandshake != null) {
+      outgoing.add(initialHandshake);
     }
 
-    _connectedHost = nodeAddress;
-
-    // Abre a stream bidirecional ClientStreamService/Connect
-    final StreamController<ClientEnvelopeProto> outController =
-        StreamController<ClientEnvelopeProto>();
-    _outgoingController = outController;
-
-    final ClientCall<ClientEnvelopeProto, ServerEnvelopeProto> streamCall = channel.createCall(
-      IspChatGrpcMethods.connectStream,
-      outController.stream,
-      CallOptions(),
-    );
-
-    _incomingSubscription = streamCall.response.listen(
-      (ServerEnvelopeProto serverEnvelope) async {
-        final DecryptedIncomingEvent? event =
-            await sessionManager.processIncomingServerEnvelope(
-          localIdentity: identity,
-          serverEnvelope: serverEnvelope,
-        );
-        if (event != null && !_decryptedEventsController.isClosed) {
-          _decryptedEventsController.add(event);
+    _incomingSub = responseStream.listen(
+      (envelope) {
+        _reconnectAttempt = 0;
+        if (!_incomingBroadcast.isClosed) {
+          _incomingBroadcast.add(envelope);
         }
       },
-      onError: (_) {},
+      onError: (_) => _scheduleReconnect(),
+      onDone: () => _scheduleReconnect(),
+      cancelOnError: false,
     );
-
-    // Envia o primeiro frame AUTH_HANDSHAKE assinado para autenticar a stream e drenar a fila offline do Redis
-    final ClientEnvelopeProto handshake =
-        await sessionManager.createSignedAuthHandshake(identity);
-    outController.add(handshake);
-
-    return regResponse;
   }
 
-  /// Consulta as sessoes ativas e chaves publicas de um usuario na DHT Kademlia (`FindUserSessions`).
-  Future<FindUserSessionsResponseProto> findUserSessionsInDht(String targetUuid) async {
-    final ClientChannel? channel = _channel;
-    if (channel == null) {
-      throw StateError('Canal gRPC nao esta conectado ao No do provedor.');
+  Future<void> sendEnvelope(ClientEnvelope envelope) async {
+    final outgoing = _outgoingController;
+    if (outgoing == null || outgoing.isClosed) {
+      throw StateError('Bidirectional gRPC message stream is not open.');
     }
-
-    final FindUserSessionsRequestProto req =
-        FindUserSessionsRequestProto(targetUuid: targetUuid);
-    final ClientCall<FindUserSessionsRequestProto, FindUserSessionsResponseProto> call =
-        channel.createCall(
-      IspChatGrpcMethods.findUserSessions,
-      Stream<FindUserSessionsRequestProto>.value(req),
-      CallOptions(timeout: const Duration(seconds: 5)),
-    );
-    return call.response.single;
+    outgoing.add(envelope);
   }
 
-  /// Envia um `ClientEnvelopeProto` ja assinado e criptografado pela stream gRPC ativa.
-  /// Retorna `true` se foi despachado na rede em tempo real, ou `false` se estiver offline.
-  bool sendSignedEnvelope(ClientEnvelopeProto envelope) {
-    final StreamController<ClientEnvelopeProto>? out = _outgoingController;
-    if (out == null || out.isClosed) {
-      return false;
+  void _scheduleReconnect() {
+    if (_manualDisconnect || !_streamActive || _edgeChannel == null) {
+      return;
     }
-    out.add(envelope);
-    return true;
+    _reconnectTimer?.cancel();
+    final steps = NetworkBootstrapConfig.defaultReconnectBackoffSeconds;
+    final idx = _reconnectAttempt.clamp(0, steps.length - 1);
+    final delaySeconds = steps[idx];
+    _reconnectAttempt++;
+
+    _reconnectTimer = Timer(Duration(seconds: delaySeconds), () async {
+      if (_manualDisconnect || !_streamActive || _edgeChannel == null) {
+        return;
+      }
+      try {
+        await openMessageStream(onReconnected: _onReconnected);
+        if (_onReconnected != null) {
+          await _onReconnected!();
+        }
+      } catch (_) {
+        _scheduleReconnect();
+      }
+    });
   }
 
-  /// Envia uma mensagem de texto E2E ou sinalizacao WebRTC pela stream ativa.
-  Future<void> sendEncryptedEvent({
-    required UserIdentity senderIdentity,
-    required ContactBundle recipientContact,
-    required ProtoMessageType type,
-    required String cleartextOrJsonSignal,
-  }) async {
-    final StreamController<ClientEnvelopeProto>? out = _outgoingController;
-    if (out == null || out.isClosed) {
-      throw StateError('Stream gRPC nao esta conectada ao No do provedor.');
-    }
-
-    final ClientEnvelopeProto envelope =
-        await sessionManager.buildOutgoingEncryptedEnvelope(
-      senderIdentity: senderIdentity,
-      recipientContact: recipientContact,
-      type: type,
-      cleartextOrJsonSignal: cleartextOrJsonSignal,
-    );
-
-    out.add(envelope);
-  }
-
-  /// Encerra a stream e fecha o canal gRPC.
-  Future<void> disconnect() async {
-    _connectedHost = null;
-    await _incomingSubscription?.cancel();
-    _incomingSubscription = null;
-
+  Future<void> _closeStreamOnly() async {
+    await _incomingSub?.cancel();
+    _incomingSub = null;
     await _outgoingController?.close();
     _outgoingController = null;
+  }
 
-    final ClientChannel? ch = _channel;
-    _channel = null;
-    if (ch != null) {
-      await ch.shutdown();
+  Future<void> disconnect() async {
+    _manualDisconnect = true;
+    _streamActive = false;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    await _closeStreamOnly();
+
+    final edge = _edgeChannel;
+    final principal = _principalChannel;
+    _edgeChannel = null;
+    _principalChannel = null;
+    _connectedAddress = null;
+    _principalAddress = null;
+
+    if (edge != null) {
+      await edge.shutdown();
+    }
+    if (principal != null && !identical(principal, edge)) {
+      await principal.shutdown();
     }
   }
+
+  String? get connectedPrincipalAddress => _principalAddress;
 
   Future<void> dispose() async {
     await disconnect();
-    await _decryptedEventsController.close();
+    if (!_incomingBroadcast.isClosed) {
+      await _incomingBroadcast.close();
+    }
   }
 }

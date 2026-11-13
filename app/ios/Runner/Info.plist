@@ -49,6 +49,10 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Necessario para ler QR Codes de pareamento/verificacao e realizar chamadas de video E2E.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Necessario para realizar chamadas de voz e video criptografadas E2E via WebRTC.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

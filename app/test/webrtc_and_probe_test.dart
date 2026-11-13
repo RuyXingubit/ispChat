@@ -1,162 +1,330 @@
-import 'dart:io';
+import 'dart:async';
 
 import 'package:app/core/crypto/identity_crypto_service.dart';
 import 'package:app/core/discovery/tcp_latency_probe.dart';
-import 'package:app/core/grpc/ispchat_pb.dart';
+import 'package:app/core/grpc/generated/ispchat.pbgrpc.dart';
+import 'package:app/core/grpc/ispchat_node_client.dart';
 import 'package:app/core/messaging/e2e_session_manager.dart';
 import 'package:app/core/security/blocklist_service.dart';
+import 'package:app/core/storage/secure_local_vault.dart';
 import 'package:app/core/webrtc/webrtc_call_coordinator.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' hide MessageType;
+import 'package:grpc/grpc.dart' as grpc;
 
-void main() {
-  group('WebRtcCallCoordinator (Ciclo Completo de Sinalizacao WebRTC E2E)', () {
-    test('Deve negociar RING, SDP_OFFER, SDP_ANSWER, ICE_CANDIDATE e CALL_DECLINE criptografados E2E', () async {
-      final IdentityCryptoService crypto = IdentityCryptoService();
-      final E2eSessionManager aliceManager = E2eSessionManager(
-        cryptoService: crypto,
-        blocklistService: BlocklistService(),
-      );
-      final E2eSessionManager bobManager = E2eSessionManager(
-        cryptoService: crypto,
-        blocklistService: BlocklistService(),
-      );
+class _FakeWebRtcEngine implements WebRtcMediaEngine {
+  bool started = false;
+  bool muted = false;
+  bool videoDisabled = false;
+  bool closed = false;
+  RTCSessionDescription? lastRemote;
+  RTCSessionDescription? lastLocal;
+  final List<RTCIceCandidate> addedIce = <RTCIceCandidate>[];
+  void Function(RTCIceCandidate)? _onIce;
+  void Function()? _onTrack;
 
-      final WebRtcCallCoordinator aliceCalls = WebRtcCallCoordinator(sessionManager: aliceManager);
-      final WebRtcCallCoordinator bobCalls = WebRtcCallCoordinator(sessionManager: bobManager);
+  @override
+  RTCVideoRenderer? get localVideoRenderer => null;
 
-      final UserIdentity alice = await crypto.generateNewIdentity();
-      final UserIdentity bob = await crypto.generateNewIdentity();
+  @override
+  RTCVideoRenderer? get remoteVideoRenderer => null;
 
-      final ContactBundle aliceContact = await crypto.parseAndVerifyContactUri(
-        crypto.buildShareableContactUri(alice),
-      );
-      final ContactBundle bobContact = await crypto.parseAndVerifyContactUri(
-        crypto.buildShareableContactUri(bob),
-      );
+  @override
+  Future<void> initializeRenderers() async {}
 
-      aliceManager.registerVerifiedContact(bobContact);
-      bobManager.registerVerifiedContact(aliceContact);
+  @override
+  Future<void> startSession({
+    required Map<String, dynamic> rtcConfiguration,
+    required bool videoEnabled,
+    required void Function(RTCIceCandidate candidate) onIceCandidate,
+    required void Function() onRemoteTrackReady,
+  }) async {
+    started = true;
+    _onIce = onIceCandidate;
+    _onTrack = onRemoteTrackReady;
+  }
 
-      const String callId = '01950000-0000-7000-8000-00000000ca11';
+  @override
+  Future<RTCSessionDescription> createOffer() async {
+    return RTCSessionDescription('v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n', 'offer');
+  }
 
-      // 1. Alice inicia o toque (RING)
-      final ClientEnvelopeProto ringClient = await aliceCalls.initiateCallRing(
-        callerIdentity: alice,
-        calleeContact: bobContact,
-        callId: callId,
-        videoEnabled: true,
-      );
-      expect(aliceCalls.currentCall.state, equals(CallLifecycleState.ringingOutgoing));
+  @override
+  Future<RTCSessionDescription> createAnswer() async {
+    return RTCSessionDescription('v=0\r\no=- 2 1 IN IP4 127.0.0.1\r\n', 'answer');
+  }
 
-      final DecryptedIncomingEvent? bobRingEvent = await bobManager.processIncomingServerEnvelope(
-        localIdentity: bob,
-        serverEnvelope: _toServerEnvelope(ringClient),
-      );
-      expect(bobRingEvent, isNotNull);
-      final WebRtcCallSnapshot bobAfterRing = bobCalls.handleIncomingSignalingEvent(bobRingEvent!);
-      expect(bobAfterRing.state, equals(CallLifecycleState.ringingIncoming));
-      expect(bobAfterRing.callId, equals(callId));
+  @override
+  Future<void> setLocalDescription(RTCSessionDescription description) async {
+    lastLocal = description;
+  }
 
-      // 2. Alice envia SDP_OFFER criptografado E2E
-      const String sampleOfferSdp = 'v=0\r\no=- 111 2 IN IP6 2804:14d::1\r\ns=-\r\n';
-      final ClientEnvelopeProto offerClient = await aliceCalls.createEncryptedSdpOffer(
-        callerIdentity: alice,
-        calleeContact: bobContact,
-        callId: callId,
-        sdpOffer: sampleOfferSdp,
-      );
-      final DecryptedIncomingEvent? bobOfferEvent = await bobManager.processIncomingServerEnvelope(
-        localIdentity: bob,
-        serverEnvelope: _toServerEnvelope(offerClient),
-      );
-      final WebRtcCallSnapshot bobAfterOffer = bobCalls.handleIncomingSignalingEvent(bobOfferEvent!);
-      expect(bobAfterOffer.state, equals(CallLifecycleState.connecting));
-      expect(bobAfterOffer.remoteSdpOffer, equals(sampleOfferSdp));
+  @override
+  Future<void> setRemoteDescription(RTCSessionDescription description) async {
+    lastRemote = description;
+  }
 
-      // 3. Bob atende enviando SDP_ANSWER criptografado E2E
-      const String sampleAnswerSdp = 'v=0\r\no=- 222 2 IN IP6 2804:14d::2\r\ns=-\r\n';
-      final ClientEnvelopeProto answerClient = await bobCalls.createEncryptedSdpAnswer(
-        calleeIdentity: bob,
-        callerContact: aliceContact,
-        callId: callId,
-        sdpAnswer: sampleAnswerSdp,
-      );
-      expect(bobCalls.currentCall.state, equals(CallLifecycleState.connected));
+  @override
+  Future<void> addIceCandidate(RTCIceCandidate candidate) async {
+    addedIce.add(candidate);
+  }
 
-      final DecryptedIncomingEvent? aliceAnswerEvent = await aliceManager.processIncomingServerEnvelope(
-        localIdentity: alice,
-        serverEnvelope: _toServerEnvelope(answerClient),
-      );
-      final WebRtcCallSnapshot aliceAfterAnswer = aliceCalls.handleIncomingSignalingEvent(aliceAnswerEvent!);
-      expect(aliceAfterAnswer.state, equals(CallLifecycleState.connected));
-      expect(aliceAfterAnswer.remoteSdpAnswer, equals(sampleAnswerSdp));
+  @override
+  void setMicrophoneMuted(bool m) => muted = m;
 
-      // 4. Troca de ICE_CANDIDATE criptografado E2E
-      final ClientEnvelopeProto iceClient = await aliceCalls.createEncryptedIceCandidate(
-        localIdentity: alice,
-        peerContact: bobContact,
-        callId: callId,
-        candidate: 'candidate:1 1 UDP 2122252543 2804:14d::1 54321 typ host',
-        sdpMid: '0',
-        sdpMLineIndex: 0,
-      );
-      final DecryptedIncomingEvent? bobIceEvent = await bobManager.processIncomingServerEnvelope(
-        localIdentity: bob,
-        serverEnvelope: _toServerEnvelope(iceClient),
-      );
-      final WebRtcCallSnapshot bobAfterIce = bobCalls.handleIncomingSignalingEvent(bobIceEvent!);
-      expect(bobAfterIce.remoteIceCandidates.length, equals(1));
+  @override
+  void setVideoDisabled(bool d) => videoDisabled = d;
 
-      // 5. Encerramento da chamada (CALL_DECLINE)
-      final ClientEnvelopeProto declineClient = await bobCalls.declineOrHangupCall(
-        localIdentity: bob,
-        peerContact: aliceContact,
-        callId: callId,
-      );
-      final DecryptedIncomingEvent? aliceDeclineEvent = await aliceManager.processIncomingServerEnvelope(
-        localIdentity: alice,
-        serverEnvelope: _toServerEnvelope(declineClient),
-      );
-      final WebRtcCallSnapshot aliceAfterDecline = aliceCalls.handleIncomingSignalingEvent(aliceDeclineEvent!);
-      expect(aliceAfterDecline.state, equals(CallLifecycleState.declined));
-    });
-  });
+  @override
+  Future<void> stopAndClose() async {
+    closed = true;
+  }
 
-  group('TcpLatencyProbe (Medicao Real de Ping TCP e Parser IPv4/IPv6)', () {
-    test('Deve fazer parse de enderecos IPv4, hostname e IPv6 com colchetes', () {
-      final ({String host, int port}) ipv4Default = TcpLatencyProbe.parseHostAndPort('203.0.113.10');
-      expect(ipv4Default.host, equals('203.0.113.10'));
-      expect(ipv4Default.port, equals(443));
-
-      final ({String host, int port}) ipv4Custom = TcpLatencyProbe.parseHostAndPort('127.0.0.1:8443');
-      expect(ipv4Custom.host, equals('127.0.0.1'));
-      expect(ipv4Custom.port, equals(8443));
-
-      final ({String host, int port}) ipv6Bracket = TcpLatencyProbe.parseHostAndPort('[2804:14d:1::99]:443');
-      expect(ipv6Bracket.host, equals('2804:14d:1::99'));
-      expect(ipv6Bracket.port, equals(443));
-    });
-
-    test('Deve medir latencia TCP real contra um socket local aberto', () async {
-      final ServerSocket server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
-      addTearDown(() async => server.close());
-
-      const TcpLatencyProbe probe = TcpLatencyProbe(timeout: Duration(seconds: 1));
-      final int? latencyMs = await probe.measureLatencyMs('127.0.0.1:${server.port}');
-      expect(latencyMs, isNotNull);
-      expect(latencyMs!, greaterThanOrEqualTo(0));
-    });
-  });
+  void simulateIceAndTrack() {
+    _onIce?.call(RTCIceCandidate('candidate:1 1 udp 1 127.0.0.1 9999 typ host', '0', 0));
+    _onTrack?.call();
+  }
 }
 
-ServerEnvelopeProto _toServerEnvelope(ClientEnvelopeProto client) {
-  return ServerEnvelopeProto(
-    messageId: client.messageId,
-    senderUuid: client.senderUuid,
-    type: client.type,
-    encryptedPayload: client.encryptedPayload,
-    senderPublicKey: client.senderPublicKey,
-    signature: client.signature,
-    timestamp: client.timestamp,
-  );
+class _FakeRelayServices {
+  final Map<String, StreamController<ServerEnvelope>> streams = {};
+  final List<UserSessionInfo> registered = [];
+
+  void dispatchClientEnvelope(ClientEnvelope env) {
+    final target = streams[env.receiverUuid];
+    if (target == null || target.isClosed) return;
+    target.add(
+      ServerEnvelope()
+        ..messageId = env.messageId
+        ..senderUuid = env.senderUuid
+        ..senderDeviceId = env.senderDeviceId
+        ..receiverUuid = env.receiverUuid
+        ..type = env.type
+        ..encryptedPayload = env.encryptedPayload
+        ..senderPublicKey = env.senderPublicKey
+        ..signature = env.signature
+        ..timestamp = env.timestamp
+        ..refMessageId = env.refMessageId
+        ..senderDelegationCert = env.senderDelegationCert,
+    );
+  }
+}
+
+class _TestDht extends DhtClientServiceBase {
+  final _FakeRelayServices relay;
+  _TestDht(this.relay);
+
+  @override
+  Future<RegisterSessionResponse> registerSession(
+    grpc.ServiceCall call,
+    RegisterSessionRequest request,
+  ) async {
+    relay.registered.removeWhere(
+      (s) => s.deviceId == request.deviceId,
+    );
+    final session = UserSessionInfo()
+      ..nodeAddress = request.nodeAddress
+      ..ed25519PublicKey = request.publicKey
+      ..x25519PublicKey = request.x25519PublicKey
+      ..timestamp = request.timestamp
+      ..deviceId = request.deviceId
+      ..rootEd25519Pub = request.rootEd25519Pub
+      ..deviceEd25519Pub = request.publicKey
+      ..sessionSignature = request.signature;
+    if (request.hasDelegationCert()) {
+      session.delegationCert = request.delegationCert;
+    }
+    if (request.hasVerificationCredential()) {
+      session.verificationCredential = request.verificationCredential;
+    }
+    relay.registered.add(session);
+    return RegisterSessionResponse()..success = true;
+  }
+
+  @override
+  Future<FindUserSessionsResponse> findUserSessions(
+    grpc.ServiceCall call,
+    FindUserSessionsRequest request,
+  ) async {
+    return FindUserSessionsResponse()
+      ..sessions.addAll(
+        relay.registered.where(
+          (s) => s.delegationCert.userUuid == request.targetUuid,
+        ),
+      );
+  }
+}
+
+class _TestStream extends ClientStreamServiceBase {
+  final _FakeRelayServices relay;
+  _TestStream(this.relay);
+
+  @override
+  Stream<ServerEnvelope> connect(
+    grpc.ServiceCall call,
+    Stream<ClientEnvelope> request,
+  ) {
+    final controller = StreamController<ServerEnvelope>();
+    request.listen(
+      (env) {
+        if (env.type == MessageType.AUTH_HANDSHAKE) {
+          relay.streams[env.senderUuid] = controller;
+        } else {
+          relay.dispatchClientEnvelope(env);
+        }
+      },
+      onError: (_) {
+        if (!controller.isClosed) controller.close();
+      },
+      onDone: () {
+        if (!controller.isClosed) controller.close();
+      },
+      cancelOnError: true,
+    );
+    return controller.stream;
+  }
+}
+
+class _TestTurn extends TurnCredentialServiceBase {
+  @override
+  Future<TurnCredentialResponse> getTurnCredentials(
+    grpc.ServiceCall call,
+    TurnCredentialRequest request,
+  ) async {
+    return TurnCredentialResponse()
+      ..uris.addAll(const ['turn:turn.isp.br:3478?transport=udp'])
+      ..username = 'ephemeral-user'
+      ..credential = 'hmac-secret'
+      ..ttlSeconds = 300
+      ..maxBps = 2000000;
+  }
+}
+
+void main() {
+  test('TcpLatencyProbe parses IPv4, hostnames, and bracketed IPv6', () {
+    final v4 = TcpLatencyProbe.parseHostAndPort('192.0.2.10:8443');
+    expect(v4.host, '192.0.2.10');
+    expect(v4.port, 8443);
+
+    final v6 = TcpLatencyProbe.parseHostAndPort('[2001:db8::1]:8443');
+    expect(v6.host, '2001:db8::1');
+    expect(v6.port, 8443);
+
+    expect(
+      () => TcpLatencyProbe.parseHostAndPort('[2001:db8::1'),
+      throwsFormatException,
+    );
+  });
+
+  test('WebRtcCallCoordinator full offer/TURN/answer/ICE/mute/hangup lifecycle',
+      () async {
+    const crypto = IdentityCryptoService();
+    final relay = _FakeRelayServices();
+    final server = grpc.Server.create(
+      services: [_TestDht(relay), _TestStream(relay), _TestTurn()],
+    );
+    await server.serve(address: '127.0.0.1', port: 0);
+
+    final aliceId = await crypto.generateNewIdentity();
+    final bobId = await crypto.generateNewIdentity();
+
+    final aliceVault = SecureLocalVault(store: InMemorySecureKeyValueStore());
+    final bobVault = SecureLocalVault(store: InMemorySecureKeyValueStore());
+    await aliceVault.saveContact(
+      ContactBundle(
+        uuid: bobId.userUuid,
+        ed25519PublicKey: bobId.ed25519PublicKeyBytes,
+        x25519PublicKey: bobId.x25519PublicKeyBytes,
+      ),
+    );
+    await bobVault.saveContact(
+      ContactBundle(
+        uuid: aliceId.userUuid,
+        ed25519PublicKey: aliceId.ed25519PublicKeyBytes,
+        x25519PublicKey: aliceId.x25519PublicKeyBytes,
+      ),
+    );
+
+    final aliceClient = IspChatNodeClient();
+    final bobClient = IspChatNodeClient();
+    await aliceClient.connect(
+      host: '127.0.0.1',
+      port: server.port!,
+      useTls: false,
+      routeGovernanceThroughEdgeChannel: true,
+    );
+    await bobClient.connect(
+      host: '127.0.0.1',
+      port: server.port!,
+      useTls: false,
+      routeGovernanceThroughEdgeChannel: true,
+    );
+
+    final aliceSession = await E2eSessionManager.createForRootIdentity(
+      identity: aliceId,
+      nodeClient: aliceClient,
+      vault: aliceVault,
+      blocklist: BlocklistService(),
+    );
+    final bobSession = await E2eSessionManager.createForRootIdentity(
+      identity: bobId,
+      nodeClient: bobClient,
+      vault: bobVault,
+      blocklist: BlocklistService(),
+    );
+
+    await aliceSession.initializeAndRegister();
+    await bobSession.initializeAndRegister();
+
+    final aliceEngine = _FakeWebRtcEngine();
+    final bobEngine = _FakeWebRtcEngine();
+    final aliceCall = WebRtcCallCoordinator(
+      sessionManager: aliceSession,
+      mediaEngine: aliceEngine,
+    );
+    final bobCall = WebRtcCallCoordinator(
+      sessionManager: bobSession,
+      mediaEngine: bobEngine,
+    );
+
+    try {
+      final bobRinging = bobCall.callStateStream.firstWhere(
+        (s) => s.status == CallStatus.ringingIncoming,
+      );
+      await aliceCall.startCall(
+        peer: (await aliceVault.loadContacts()).first,
+        videoEnabled: true,
+      );
+      final incomingSnap = await bobRinging.timeout(const Duration(seconds: 5));
+      expect(incomingSnap.videoEnabled, isTrue);
+
+      await bobCall.acceptIncomingCall(videoEnabled: true);
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      aliceEngine.simulateIceAndTrack();
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      expect(aliceCall.currentSnapshot.status, CallStatus.inCall);
+      expect(aliceCall.currentSnapshot.turnAuthenticated, isTrue);
+      expect(bobEngine.addedIce.length, 1);
+
+      aliceCall.toggleMute();
+      aliceCall.toggleCamera();
+      expect(aliceEngine.muted, isTrue);
+      expect(aliceEngine.videoDisabled, isTrue);
+
+      await aliceCall.hangup();
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(aliceEngine.closed, isTrue);
+      expect(bobCall.currentSnapshot.status, CallStatus.ended);
+    } finally {
+      await aliceCall.dispose();
+      await bobCall.dispose();
+      await aliceSession.dispose();
+      await bobSession.dispose();
+      await aliceClient.dispose();
+      await bobClient.dispose();
+      await server.shutdown();
+    }
+  });
 }

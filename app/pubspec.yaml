@@ -18,8 +18,10 @@ dependencies:
   uuid: ^4.6.0
   grpc: ^5.1.0
   protobuf: ^6.0.0
+  fixnum: ^1.1.1
   flutter_secure_storage: ^9.2.4
   qr_flutter: ^4.1.0
+  mobile_scanner: ^6.0.2
 
 dev_dependencies:
   flutter_test:

@@ -27,6 +27,34 @@ jobs:
     name: Backend Node (Java 25 LTS & mTLS/DHT Tests)
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ispchat
+          POSTGRES_PASSWORD: ispchat_ci_password
+          POSTGRES_DB: ispchat_principal
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U ispchat -d ispchat_principal"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      CI_POSTGRES_HOST: localhost
+      CI_POSTGRES_PORT: '5432'
+      CI_REDIS_HOST: localhost
+      CI_REDIS_PORT: '6379'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

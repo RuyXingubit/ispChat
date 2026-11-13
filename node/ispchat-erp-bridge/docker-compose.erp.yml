@@ -1,0 +1,34 @@
+services:
+  erp-bridge:
+    build:
+      context: ..
+      dockerfile: ispchat-erp-bridge/Dockerfile
+    container_name: ispchat-erp-bridge
+    restart: always
+    ports:
+      - "${ISPCHAT_ERP_HOST_BIND:-127.0.0.1}:8090:8090/tcp"
+    environment:
+      - ISPCHAT_ERP_BIND_ADDRESS=${ISPCHAT_ERP_BIND_ADDRESS:-172.28.0.10}
+      - ISPCHAT_ERP_PORT=8090
+      - ISPCHAT_ERP_NODE_ADDRESS=${ISPCHAT_ERP_NODE_ADDRESS:?ISPCHAT_ERP_NODE_ADDRESS obrigatorio}
+      - ISPCHAT_CA_CERT_PATH=/certs/ca.crt
+      - ISPCHAT_ROOT_PUBLIC_KEY=${ISPCHAT_ROOT_PUBLIC_KEY:?ISPCHAT_ROOT_PUBLIC_KEY obrigatorio}
+      - ISPCHAT_ERP_API_SECRET=${ISPCHAT_ERP_API_SECRET:?ISPCHAT_ERP_API_SECRET obrigatorio}
+      - ISPCHAT_ERP_WEBHOOK_URL=${ISPCHAT_ERP_WEBHOOK_URL:-}
+      - ISPCHAT_ERP_WEBHOOK_HMAC_SECRET=${ISPCHAT_ERP_WEBHOOK_HMAC_SECRET:-}
+      - ISPCHAT_ERP_DEVICE_ED25519_PRIV=${ISPCHAT_ERP_DEVICE_ED25519_PRIV:?ISPCHAT_ERP_DEVICE_ED25519_PRIV obrigatorio}
+      - ISPCHAT_ERP_DEVICE_X25519_PRIV=${ISPCHAT_ERP_DEVICE_X25519_PRIV:?ISPCHAT_ERP_DEVICE_X25519_PRIV obrigatorio}
+      - ISPCHAT_ERP_DELEGATION_CERT_B64=${ISPCHAT_ERP_DELEGATION_CERT_B64:?ISPCHAT_ERP_DELEGATION_CERT_B64 obrigatorio}
+      - ISPCHAT_ERP_VERIFICATION_CRED_B64=${ISPCHAT_ERP_VERIFICATION_CRED_B64:?ISPCHAT_ERP_VERIFICATION_CRED_B64 obrigatorio}
+    volumes:
+      - ../certs:/certs:ro
+    networks:
+      ispchat-erp-lan:
+        ipv4_address: 172.28.0.10
+
+networks:
+  ispchat-erp-lan:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

@@ -1,270 +1,632 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:app/core/crypto/identity_crypto_service.dart';
+import 'package:app/core/grpc/generated/ispchat.pb.dart';
 
-import '../crypto/identity_crypto_service.dart';
-
-/// Mensagem armazenada no historico local do dispositivo (ja decifrada para exibicao local).
-class StoredChatMessage {
-  final String messageId;
-  final String senderUuid;
-  final String receiverUuid;
-  final String text;
-  final int timestampMillis;
-  final bool isOutgoing;
-
-  const StoredChatMessage({
-    required this.messageId,
-    required this.senderUuid,
-    required this.receiverUuid,
-    required this.text,
-    required this.timestampMillis,
-    required this.isOutgoing,
-  });
-
-  Map<String, dynamic> toJson() => <String, dynamic>{
-        'messageId': messageId,
-        'senderUuid': senderUuid,
-        'receiverUuid': receiverUuid,
-        'text': text,
-        'timestampMillis': timestampMillis,
-        'isOutgoing': isOutgoing,
-      };
-
-  factory StoredChatMessage.fromJson(Map<String, dynamic> json) {
-    return StoredChatMessage(
-      messageId: json['messageId'] as String,
-      senderUuid: json['senderUuid'] as String,
-      receiverUuid: json['receiverUuid'] as String,
-      text: json['text'] as String,
-      timestampMillis: json['timestampMillis'] as int,
-      isOutgoing: json['isOutgoing'] as bool,
-    );
-  }
-}
-
-/// Interface de armazenamento chave-valor seguro (Keychain / Keystore ou In-Memory para testes).
+/// Abstraction over platform-secure key-value storage (Keychain / Keystore).
 abstract class KeyValueSecureStore {
-  Future<void> write(String key, String value);
-  Future<String?> read(String key);
-  Future<void> delete(String key);
+  Future<void> write({required String key, required String value});
+  Future<String?> read({required String key});
+  Future<void> delete({required String key});
 }
 
-/// Implementacao real usando `FlutterSecureStorage` (Keychain no iOS/macOS, Keystore no Android)
-/// com fallback automatico em memoria caso o ambiente de execucao nao possua Keychain ativo.
+/// Production [KeyValueSecureStore] backed by `flutter_secure_storage`.
 class FlutterSecureKeyValueStore implements KeyValueSecureStore {
-  final FlutterSecureStorage _storage = const FlutterSecureStorage();
-  final Map<String, String> _fallbackMemory = <String, String>{};
+  final FlutterSecureStorage _storage;
+
+  const FlutterSecureKeyValueStore({FlutterSecureStorage? storage})
+      : _storage = storage ?? const FlutterSecureStorage();
 
   @override
-  Future<void> write(String key, String value) async {
-    _fallbackMemory[key] = value;
-    try {
-      await _storage.write(key: key, value: value);
-    } catch (_) {
-      // Em ambientes de teste sem Keychain nativo, mantem no fallback em memoria
-    }
+  Future<void> write({required String key, required String value}) {
+    return _storage.write(key: key, value: value);
   }
 
   @override
-  Future<String?> read(String key) async {
-    try {
-      final String? val = await _storage.read(key: key);
-      if (val != null) {
-        _fallbackMemory[key] = val;
-        return val;
-      }
-    } catch (_) {}
-    return _fallbackMemory[key];
+  Future<String?> read({required String key}) {
+    return _storage.read(key: key);
   }
 
   @override
-  Future<void> delete(String key) async {
-    _fallbackMemory.remove(key);
-    try {
-      await _storage.delete(key: key);
-    } catch (_) {}
+  Future<void> delete({required String key}) {
+    return _storage.delete(key: key);
   }
 }
 
-/// Implementacao deterministica em memoria para testes unitarios e de widget.
+/// Deterministic in-memory [KeyValueSecureStore] for unit and widget tests.
 class InMemorySecureKeyValueStore implements KeyValueSecureStore {
   final Map<String, String> _data = <String, String>{};
 
   @override
-  Future<void> write(String key, String value) async {
+  Future<void> write({required String key, required String value}) async {
     _data[key] = value;
   }
 
   @override
-  Future<String?> read(String key) async {
+  Future<String?> read({required String key}) async {
     return _data[key];
   }
 
   @override
-  Future<void> delete(String key) async {
+  Future<void> delete({required String key}) async {
     _data.remove(key);
   }
 }
 
-/// Cofre Seguro Local do App Flutter.
-///
-/// Persiste de forma segura:
-/// 1. Frase semente de 12 palavras (BIP39) para restauracao automatica da identidade no boot.
-/// 2. Lista de contatos verificados (UUIDv7 + chaves publicas Ed25519 e X25519).
-/// 3. Blocklist local (UUIDv7 bloqueados silenciosamente).
-/// 4. Nos sementes injetados (Bootstrap Social).
-/// 5. Historico local de mensagens E2E por contato.
-class SecureLocalVault {
-  static const String _keyMnemonic = 'ispchat.vault.mnemonic';
-  static const String _keyContacts = 'ispchat.vault.contacts_v1';
-  static const String _keyBlocklist = 'ispchat.vault.blocklist_v1';
-  static const String _keySeeds = 'ispchat.vault.seeds_v1';
-  static const String _keyMessagesPrefix = 'ispchat.vault.messages_v1.';
+/// Locally persisted message inside a peer conversation thread.
+class StoredChatMessage {
+  final String messageId;
+  final String peerUuid;
+  final String senderUuid;
+  final String text;
+  final bool isOutgoing;
+  final int timestampMs;
+  final String deliveryState;
 
-  final KeyValueSecureStore store;
-  final IdentityCryptoService cryptoService;
-
-  SecureLocalVault({
-    required this.store,
-    required this.cryptoService,
+  const StoredChatMessage({
+    required this.messageId,
+    required this.peerUuid,
+    required this.senderUuid,
+    required this.text,
+    required this.isOutgoing,
+    required this.timestampMs,
+    this.deliveryState = 'sent',
   });
 
-  /// Salva a frase semente de 12 palavras no cofre seguro.
-  Future<void> saveIdentityMnemonic(String mnemonic) async {
-    await store.write(_keyMnemonic, mnemonic.trim().toLowerCase());
+  StoredChatMessage copyWith({
+    String? peerUuid,
+    String? deliveryState,
+  }) {
+    return StoredChatMessage(
+      messageId: messageId,
+      peerUuid: peerUuid ?? this.peerUuid,
+      senderUuid: senderUuid,
+      text: text,
+      isOutgoing: isOutgoing,
+      timestampMs: timestampMs,
+      deliveryState: deliveryState ?? this.deliveryState,
+    );
   }
 
-  /// Carrega e restaura a identidade do usuario salva no cofre seguro (ou `null` se ainda nao criada).
-  Future<UserIdentity?> loadSavedIdentity() async {
-    final String? savedMnemonic = await store.read(_keyMnemonic);
-    if (savedMnemonic == null || savedMnemonic.trim().isEmpty) {
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'messageId': messageId,
+      'peerUuid': peerUuid,
+      'senderUuid': senderUuid,
+      'text': text,
+      'isOutgoing': isOutgoing,
+      'timestampMs': timestampMs,
+      'deliveryState': deliveryState,
+    };
+  }
+
+  factory StoredChatMessage.fromJson(Map<String, dynamic> json) {
+    return StoredChatMessage(
+      messageId: json['messageId'] as String,
+      peerUuid: json['peerUuid'] as String,
+      senderUuid: json['senderUuid'] as String,
+      text: json['text'] as String,
+      isOutgoing: json['isOutgoing'] as bool,
+      timestampMs: json['timestampMs'] as int,
+      deliveryState: (json['deliveryState'] as String?) ?? 'sent',
+    );
+  }
+}
+
+/// Persisted cryptographic material for the current device (mobile or desktop).
+class StoredLocalDeviceRecord {
+  final String deviceId;
+  final DeviceRole role;
+  final Uint8List ed25519Seed;
+  final Uint8List x25519Seed;
+  final DeviceDelegationCert? delegationCert;
+  final String? pairedUserUuid;
+  final Uint8List? rootEd25519Pub;
+  final Uint8List? rootX25519Pub;
+
+  const StoredLocalDeviceRecord({
+    required this.deviceId,
+    required this.role,
+    required this.ed25519Seed,
+    required this.x25519Seed,
+    this.delegationCert,
+    this.pairedUserUuid,
+    this.rootEd25519Pub,
+    this.rootX25519Pub,
+  });
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'deviceId': deviceId,
+      'role': role.value,
+      'edSeed': base64Encode(ed25519Seed),
+      'xSeed': base64Encode(x25519Seed),
+      if (delegationCert != null)
+        'cert': base64Encode(delegationCert!.writeToBuffer()),
+      if (pairedUserUuid != null) 'pairedUserUuid': pairedUserUuid,
+      if (rootEd25519Pub != null) 'rootEd': base64Encode(rootEd25519Pub!),
+      if (rootX25519Pub != null) 'rootX': base64Encode(rootX25519Pub!),
+    };
+  }
+
+  factory StoredLocalDeviceRecord.fromJson(Map<String, dynamic> json) {
+    final certB64 = json['cert'] as String?;
+    final rootEdB64 = json['rootEd'] as String?;
+    final rootXB64 = json['rootX'] as String?;
+    return StoredLocalDeviceRecord(
+      deviceId: json['deviceId'] as String,
+      role: DeviceRole.valueOf(json['role'] as int) ?? DeviceRole.DESKTOP,
+      ed25519Seed: Uint8List.fromList(base64Decode(json['edSeed'] as String)),
+      x25519Seed: Uint8List.fromList(base64Decode(json['xSeed'] as String)),
+      delegationCert: certB64 != null
+          ? DeviceDelegationCert.fromBuffer(base64Decode(certB64))
+          : null,
+      pairedUserUuid: json['pairedUserUuid'] as String?,
+      rootEd25519Pub: rootEdB64 != null ? base64Decode(rootEdB64) : null,
+      rootX25519Pub: rootXB64 != null ? base64Decode(rootXB64) : null,
+    );
+  }
+}
+
+/// Registry entry on the Root device for a paired secondary device.
+class PairedDeviceRecord {
+  final String deviceId;
+  final String label;
+  final DeviceRole role;
+  final Uint8List deviceEd25519Pub;
+  final Uint8List deviceX25519Pub;
+  final int issuedAtMs;
+  final int expiresAtMs;
+  final bool revoked;
+
+  const PairedDeviceRecord({
+    required this.deviceId,
+    required this.label,
+    required this.role,
+    required this.deviceEd25519Pub,
+    required this.deviceX25519Pub,
+    required this.issuedAtMs,
+    required this.expiresAtMs,
+    this.revoked = false,
+  });
+
+  PairedDeviceRecord copyWith({bool? revoked, String? label}) {
+    return PairedDeviceRecord(
+      deviceId: deviceId,
+      label: label ?? this.label,
+      role: role,
+      deviceEd25519Pub: deviceEd25519Pub,
+      deviceX25519Pub: deviceX25519Pub,
+      issuedAtMs: issuedAtMs,
+      expiresAtMs: expiresAtMs,
+      revoked: revoked ?? this.revoked,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'deviceId': deviceId,
+      'label': label,
+      'role': role.value,
+      'ed': base64Encode(deviceEd25519Pub),
+      'x': base64Encode(deviceX25519Pub),
+      'issuedAtMs': issuedAtMs,
+      'expiresAtMs': expiresAtMs,
+      'revoked': revoked,
+    };
+  }
+
+  factory PairedDeviceRecord.fromJson(Map<String, dynamic> json) {
+    return PairedDeviceRecord(
+      deviceId: json['deviceId'] as String,
+      label: json['label'] as String,
+      role: DeviceRole.valueOf(json['role'] as int) ?? DeviceRole.DESKTOP,
+      deviceEd25519Pub: Uint8List.fromList(base64Decode(json['ed'] as String)),
+      deviceX25519Pub: Uint8List.fromList(base64Decode(json['x'] as String)),
+      issuedAtMs: json['issuedAtMs'] as int,
+      expiresAtMs: json['expiresAtMs'] as int,
+      revoked: (json['revoked'] as bool?) ?? false,
+    );
+  }
+}
+
+/// Encrypted local storage facade for mnemonics, V2 credentials, devices,
+/// verified contacts, seeds, and chat history.
+class SecureLocalVault {
+  static const String _keyMnemonic = 'ispchat_mnemonic_v1';
+  static const String _keyContacts = 'ispchat_contacts_v1';
+  static const String _keyBlocklist = 'ispchat_blocklist_v1';
+  static const String _keySeeds = 'ispchat_seeds_v1';
+  static const String _keyMessagesPrefix = 'ispchat_msgs_v1_';
+  static const String _keyVerificationCred = 'ispchat_verification_cred_v2';
+  static const String _keyHomeNodeClaim = 'ispchat_home_node_claim_v2';
+  static const String _keyLocalDevice = 'ispchat_local_device_v2';
+  static const String _keyPairedDevices = 'ispchat_paired_devices_v2';
+  static const String _keyLastRevocationSeq = 'ispchat_last_revocation_seq_v2';
+
+  static final Random _secureRandom = Random.secure();
+
+  final KeyValueSecureStore _store;
+  final IdentityCryptoService _crypto;
+
+  SecureLocalVault({
+    KeyValueSecureStore? store,
+    IdentityCryptoService? cryptoService,
+  })  : _store = store ?? const FlutterSecureKeyValueStore(),
+        _crypto = cryptoService ?? const IdentityCryptoService();
+
+  Future<void> saveMnemonic(String mnemonic) {
+    return _store.write(key: _keyMnemonic, value: mnemonic.trim());
+  }
+
+  Future<String?> loadMnemonic() {
+    return _store.read(key: _keyMnemonic);
+  }
+
+  Future<void> clearMnemonic() {
+    return _store.delete(key: _keyMnemonic);
+  }
+
+  Future<IdentityBundle?> restoreSavedIdentity([
+    IdentityCryptoService? cryptoOverride,
+  ]) async {
+    final saved = await loadMnemonic();
+    if (saved == null || saved.trim().isEmpty) {
       return null;
     }
-    try {
-      return await cryptoService.restoreIdentityFromMnemonic(savedMnemonic);
-    } catch (_) {
+    final crypto = cryptoOverride ?? _crypto;
+    return crypto.restoreIdentityFromMnemonic(saved);
+  }
+
+  Future<void> saveVerificationCredential(VerificationCredential credential) {
+    return _store.write(
+      key: _keyVerificationCred,
+      value: base64Encode(credential.writeToBuffer()),
+    );
+  }
+
+  Future<VerificationCredential?> loadVerificationCredential() async {
+    final raw = await _store.read(key: _keyVerificationCred);
+    if (raw == null || raw.isEmpty) {
       return null;
     }
+    return VerificationCredential.fromBuffer(base64Decode(raw));
   }
 
-  /// Persiste a lista de contatos verificados.
-  Future<void> saveContacts(List<ContactBundle> contacts) async {
-    final List<Map<String, dynamic>> serialized = contacts
-        .map((ContactBundle c) => <String, dynamic>{
-              'userUuid': c.userUuid,
-              'ed25519': base64UrlEncode(c.ed25519PublicKeyBytes),
-              'x25519': base64UrlEncode(c.x25519PublicKeyBytes),
-              if (c.directIpv6Address != null) 'ipv6': c.directIpv6Address,
-            })
-        .toList();
-    await store.write(_keyContacts, jsonEncode(serialized));
+  Future<void> clearVerificationCredential() {
+    return _store.delete(key: _keyVerificationCred);
   }
 
-  /// Carrega todos os contatos verificados do cofre local.
-  Future<List<ContactBundle>> loadContacts() async {
-    final String? rawJson = await store.read(_keyContacts);
-    if (rawJson == null || rawJson.isEmpty) {
-      return <ContactBundle>[];
+  Future<void> saveHomeNodeClaim(HomeNodeClaim claim) {
+    return _store.write(
+      key: _keyHomeNodeClaim,
+      value: base64Encode(claim.writeToBuffer()),
+    );
+  }
+
+  Future<HomeNodeClaim?> loadHomeNodeClaim() async {
+    final raw = await _store.read(key: _keyHomeNodeClaim);
+    if (raw == null || raw.isEmpty) {
+      return null;
     }
-    try {
-      final List<dynamic> list = jsonDecode(rawJson) as List<dynamic>;
-      final List<ContactBundle> loaded = <ContactBundle>[];
-      for (final dynamic item in list) {
-        final Map<String, dynamic> map = item as Map<String, dynamic>;
-        final String uuid = map['userUuid'] as String;
-        final Uint8List ed25519 = Uint8List.fromList(base64Url.decode(map['ed25519'] as String));
-        final Uint8List x25519 = Uint8List.fromList(base64Url.decode(map['x25519'] as String));
-        final String? ipv6 = map['ipv6'] as String?;
-
-        final bool bound = await cryptoService.verifyIdentityBinding(uuid, ed25519);
-        if (bound) {
-          loaded.add(ContactBundle(
-            userUuid: uuid,
-            ed25519PublicKeyBytes: ed25519,
-            x25519PublicKeyBytes: x25519,
-            directIpv6Address: ipv6,
-          ));
-        }
-      }
-      return loaded;
-    } catch (_) {
-      return <ContactBundle>[];
-    }
+    return HomeNodeClaim.fromBuffer(base64Decode(raw));
   }
 
-  /// Persiste o conjunto de UUIDs bloqueados na Blocklist Local.
-  Future<void> saveBlockedUuids(Set<String> blockedUuids) async {
-    await store.write(_keyBlocklist, jsonEncode(blockedUuids.toList()));
+  Future<void> saveLocalDeviceRecord(StoredLocalDeviceRecord record) {
+    return _store.write(
+      key: _keyLocalDevice,
+      value: jsonEncode(record.toJson()),
+    );
   }
 
-  /// Carrega os UUIDs bloqueados da Blocklist Local.
-  Future<List<String>> loadBlockedUuids() async {
-    final String? rawJson = await store.read(_keyBlocklist);
-    if (rawJson == null || rawJson.isEmpty) {
-      return <String>[];
+  Future<StoredLocalDeviceRecord?> loadLocalDeviceRecord() async {
+    final raw = await _store.read(key: _keyLocalDevice);
+    if (raw == null || raw.isEmpty) {
+      return null;
     }
-    try {
-      final List<dynamic> list = jsonDecode(rawJson) as List<dynamic>;
-      return list.map((dynamic e) => e.toString()).toList();
-    } catch (_) {
-      return <String>[];
-    }
+    return StoredLocalDeviceRecord.fromJson(
+      jsonDecode(raw) as Map<String, dynamic>,
+    );
   }
 
-  /// Persiste a lista de nos sementes (Bootstrap Social).
-  Future<void> saveSeedNodes(List<String> seeds) async {
-    await store.write(_keySeeds, jsonEncode(seeds));
+  Future<void> clearLocalDeviceRecord() {
+    return _store.delete(key: _keyLocalDevice);
   }
 
-  /// Carrega a lista de nos sementes.
-  Future<List<String>> loadSeedNodes() async {
-    final String? rawJson = await store.read(_keySeeds);
-    if (rawJson == null || rawJson.isEmpty) {
-      return <String>[];
-    }
-    try {
-      final List<dynamic> list = jsonDecode(rawJson) as List<dynamic>;
-      return list.map((dynamic e) => e.toString()).toList();
-    } catch (_) {
-      return <String>[];
-    }
-  }
-
-  /// Adiciona uma mensagem ao historico local de conversa com um contato especifico (idempotente por messageId).
-  Future<List<StoredChatMessage>> appendChatMessage(
-    String peerUuid,
-    StoredChatMessage message,
-  ) async {
-    final List<StoredChatMessage> current = await loadChatMessages(peerUuid);
-    final bool alreadyExists =
-        current.any((StoredChatMessage m) => m.messageId == message.messageId);
-    if (!alreadyExists) {
-      current.add(message);
-      final String key = '$_keyMessagesPrefix${peerUuid.trim().toLowerCase()}';
-      await store.write(
-        key,
-        jsonEncode(current.map((StoredChatMessage m) => m.toJson()).toList()),
+  /// Loads persisted secondary device credentials, or generates & stores a
+  /// fresh pair if none exists yet.
+  Future<LocalDeviceIdentity> loadOrCreateLocalDeviceIdentity({
+    required DeviceRole role,
+    IdentityCryptoService? cryptoOverride,
+  }) async {
+    final crypto = cryptoOverride ?? _crypto;
+    final existing = await loadLocalDeviceRecord();
+    if (existing != null) {
+      return crypto.restoreDeviceIdentityFromSeeds(
+        deviceId: existing.deviceId,
+        role: existing.role,
+        ed25519Seed: existing.ed25519Seed,
+        x25519Seed: existing.x25519Seed,
+        delegationCert: existing.delegationCert,
       );
     }
-    return current;
+    final edSeed = _randomSeed(32);
+    final xSeed = _randomSeed(32);
+    final deviceId = IdentityCryptoService.generateTemporalUuidV7();
+    final record = StoredLocalDeviceRecord(
+      deviceId: deviceId,
+      role: role,
+      ed25519Seed: edSeed,
+      x25519Seed: xSeed,
+    );
+    await saveLocalDeviceRecord(record);
+    return crypto.restoreDeviceIdentityFromSeeds(
+      deviceId: deviceId,
+      role: role,
+      ed25519Seed: edSeed,
+      x25519Seed: xSeed,
+    );
   }
 
-  /// Carrega o historico local de mensagens trocadas com um contato.
+  Future<List<PairedDeviceRecord>> loadPairedDevices() async {
+    final raw = await _store.read(key: _keyPairedDevices);
+    if (raw == null || raw.isEmpty) {
+      return const <PairedDeviceRecord>[];
+    }
+    final decoded = jsonDecode(raw) as List<dynamic>;
+    return decoded
+        .map((e) => PairedDeviceRecord.fromJson(e as Map<String, dynamic>))
+        .toList(growable: false);
+  }
+
+  Future<void> savePairedDevice(PairedDeviceRecord device) async {
+    final list = List<PairedDeviceRecord>.from(await loadPairedDevices());
+    final normId = CanonicalTranscripts.canonicalUuid(device.deviceId);
+    final idx = list.indexWhere(
+      (d) => CanonicalTranscripts.canonicalUuid(d.deviceId) == normId,
+    );
+    if (idx >= 0) {
+      list[idx] = device;
+    } else {
+      list.add(device);
+    }
+    await _store.write(
+      key: _keyPairedDevices,
+      value: jsonEncode(list.map((d) => d.toJson()).toList(growable: false)),
+    );
+  }
+
+  Future<void> markPairedDeviceRevoked(String deviceId) async {
+    final normId = CanonicalTranscripts.canonicalUuid(deviceId);
+    final list = await loadPairedDevices();
+    final updated = list
+        .map(
+          (d) => CanonicalTranscripts.canonicalUuid(d.deviceId) == normId
+              ? d.copyWith(revoked: true)
+              : d,
+        )
+        .toList(growable: false);
+    await _store.write(
+      key: _keyPairedDevices,
+      value: jsonEncode(updated.map((d) => d.toJson()).toList(growable: false)),
+    );
+  }
+
+  Future<int> loadLastRevocationSeq() async {
+    final raw = await _store.read(key: _keyLastRevocationSeq);
+    return int.tryParse(raw ?? '') ?? 0;
+  }
+
+  Future<void> saveLastRevocationSeq(int seq) {
+    return _store.write(key: _keyLastRevocationSeq, value: seq.toString());
+  }
+
+  Future<List<ContactBundle>> loadContacts() async {
+    final raw = await _store.read(key: _keyContacts);
+    if (raw == null || raw.isEmpty) {
+      return const <ContactBundle>[];
+    }
+    final list = jsonDecode(raw) as List<dynamic>;
+    return list.map((item) {
+      final map = item as Map<String, dynamic>;
+      final vcB64 = map['vc'] as String?;
+      final vc = vcB64 != null && vcB64.isNotEmpty
+          ? VerificationCredential.fromBuffer(base64Decode(vcB64))
+          : null;
+      final hcB64 = map['hc'] as String?;
+      final hc = hcB64 != null && hcB64.isNotEmpty
+          ? HomeNodeClaim.fromBuffer(base64Decode(hcB64))
+          : null;
+      return ContactBundle(
+        uuid: map['u'] as String,
+        ed25519PublicKey: Uint8List.fromList(base64Decode(map['ed'] as String)),
+        x25519PublicKey: Uint8List.fromList(base64Decode(map['x'] as String)),
+        displayName: map['n'] as String?,
+        isVerified: (map['verified'] as bool?) ?? (vc != null),
+        docType: vc?.docType,
+        publicCnpj: vc != null && vc.publicCnpj.isNotEmpty ? vc.publicCnpj : null,
+        publicDisplayName: vc != null && vc.publicDisplayName.isNotEmpty
+            ? vc.publicDisplayName
+            : null,
+        verifyingIspCnpj: vc != null && vc.verifyingIspCnpj.isNotEmpty
+            ? vc.verifyingIspCnpj
+            : null,
+        verifyingIspName: vc != null && vc.verifyingIspName.isNotEmpty
+            ? vc.verifyingIspName
+            : null,
+        verificationCredential: vc,
+        homeNodeClaim: hc,
+      );
+    }).toList(growable: false);
+  }
+
+  Future<void> saveContact(ContactBundle contact) async {
+    final contacts = List<ContactBundle>.from(await loadContacts());
+    final normUuid = CanonicalTranscripts.canonicalUuid(contact.uuid);
+    final idx = contacts.indexWhere(
+      (c) => CanonicalTranscripts.canonicalUuid(c.uuid) == normUuid,
+    );
+    if (idx >= 0) {
+      contacts[idx] = contact;
+    } else {
+      contacts.add(contact);
+    }
+    await _writeContacts(contacts);
+  }
+
+  Future<void> removeContact(String uuid) async {
+    final normUuid = CanonicalTranscripts.canonicalUuid(uuid);
+    final contacts = (await loadContacts())
+        .where((c) => CanonicalTranscripts.canonicalUuid(c.uuid) != normUuid)
+        .toList(growable: false);
+    await _writeContacts(contacts);
+  }
+
+  /// Replaces an existing contact UUID when a CPF rebind `IdentityReplacementNotice`
+  /// is verified, migrating chat history seamlessly under the new UUID.
+  Future<void> migrateReplacedContact({
+    required String oldUserUuid,
+    required ContactBundle updatedContact,
+  }) async {
+    final normOld = CanonicalTranscripts.canonicalUuid(oldUserUuid);
+    final normNew = CanonicalTranscripts.canonicalUuid(updatedContact.uuid);
+    final contacts = List<ContactBundle>.from(await loadContacts())
+      ..removeWhere(
+        (c) =>
+            CanonicalTranscripts.canonicalUuid(c.uuid) == normOld ||
+            CanonicalTranscripts.canonicalUuid(c.uuid) == normNew,
+      )
+      ..add(updatedContact);
+    await _writeContacts(contacts);
+
+    if (normOld != normNew) {
+      final oldMessages = await loadChatMessages(normOld);
+      if (oldMessages.isNotEmpty) {
+        final newMessages = await loadChatMessages(normNew);
+        final merged = <String, StoredChatMessage>{
+          for (final m in oldMessages) m.messageId: m.copyWith(peerUuid: normNew),
+          for (final m in newMessages) m.messageId: m,
+        };
+        final sorted = merged.values.toList()
+          ..sort((a, b) => a.timestampMs.compareTo(b.timestampMs));
+        await _writeMessagesForPeer(normNew, sorted);
+        await _store.delete(key: '$_keyMessagesPrefix$normOld');
+      }
+    }
+  }
+
+  Future<List<String>> loadBlockedUuids() async {
+    final raw = await _store.read(key: _keyBlocklist);
+    if (raw == null || raw.isEmpty) {
+      return const <String>[];
+    }
+    return (jsonDecode(raw) as List<dynamic>).cast<String>();
+  }
+
+  Future<void> saveBlockedUuids(Iterable<String> uuids) {
+    final unique = uuids.map((u) => u.trim()).where((u) => u.isNotEmpty).toSet();
+    return _store.write(
+      key: _keyBlocklist,
+      value: jsonEncode(unique.toList(growable: false)),
+    );
+  }
+
+  Future<List<String>> loadBootstrapSeeds() async {
+    final raw = await _store.read(key: _keySeeds);
+    if (raw == null || raw.isEmpty) {
+      return const <String>[];
+    }
+    return (jsonDecode(raw) as List<dynamic>).cast<String>();
+  }
+
+  Future<void> saveBootstrapSeeds(Iterable<String> seeds) {
+    final unique = seeds.map((s) => s.trim()).where((s) => s.isNotEmpty).toSet();
+    return _store.write(
+      key: _keySeeds,
+      value: jsonEncode(unique.toList(growable: false)),
+    );
+  }
+
   Future<List<StoredChatMessage>> loadChatMessages(String peerUuid) async {
-    final String key = '$_keyMessagesPrefix${peerUuid.trim().toLowerCase()}';
-    final String? rawJson = await store.read(key);
-    if (rawJson == null || rawJson.isEmpty) {
-      return <StoredChatMessage>[];
+    final raw = await _store.read(key: '$_keyMessagesPrefix$peerUuid');
+    if (raw == null || raw.isEmpty) {
+      return const <StoredChatMessage>[];
     }
-    try {
-      final List<dynamic> list = jsonDecode(rawJson) as List<dynamic>;
-      return list
-          .map((dynamic item) => StoredChatMessage.fromJson(item as Map<String, dynamic>))
-          .toList();
-    } catch (_) {
-      return <StoredChatMessage>[];
+    final decoded = jsonDecode(raw) as List<dynamic>;
+    return decoded
+        .map((e) => StoredChatMessage.fromJson(e as Map<String, dynamic>))
+        .toList(growable: false);
+  }
+
+  Future<void> appendChatMessage(StoredChatMessage message) async {
+    final existing = List<StoredChatMessage>.from(
+      await loadChatMessages(message.peerUuid),
+    );
+    final idx = existing.indexWhere((m) => m.messageId == message.messageId);
+    if (idx >= 0) {
+      existing[idx] = message;
+    } else {
+      existing.add(message);
     }
+    await _writeMessagesForPeer(message.peerUuid, existing);
+  }
+
+  Future<void> updateChatMessageStatus({
+    required String peerUuid,
+    required String messageId,
+    required String deliveryState,
+  }) async {
+    final existing = await loadChatMessages(peerUuid);
+    var changed = false;
+    final updated = existing.map((m) {
+      if (m.messageId == messageId) {
+        changed = true;
+        return m.copyWith(deliveryState: deliveryState);
+      }
+      return m;
+    }).toList(growable: false);
+    if (changed) {
+      await _writeMessagesForPeer(peerUuid, updated);
+    }
+  }
+
+  Future<void> _writeContacts(List<ContactBundle> contacts) {
+    final serialized = contacts
+        .map((c) => <String, dynamic>{
+              'u': c.uuid,
+              'ed': base64Encode(c.ed25519PublicKey),
+              'x': base64Encode(c.x25519PublicKey),
+              if (c.displayName != null) 'n': c.displayName,
+              'verified': c.isVerified,
+              if (c.verificationCredential != null)
+                'vc': base64Encode(c.verificationCredential!.writeToBuffer()),
+              if (c.homeNodeClaim != null)
+                'hc': base64Encode(c.homeNodeClaim!.writeToBuffer()),
+            })
+        .toList(growable: false);
+    return _store.write(key: _keyContacts, value: jsonEncode(serialized));
+  }
+
+  Future<void> _writeMessagesForPeer(
+    String peerUuid,
+    List<StoredChatMessage> messages,
+  ) {
+    return _store.write(
+      key: '$_keyMessagesPrefix$peerUuid',
+      value: jsonEncode(
+        messages.map((m) => m.toJson()).toList(growable: false),
+      ),
+    );
+  }
+
+  static Uint8List _randomSeed(int len) {
+    final out = Uint8List(len);
+    for (var i = 0; i < len; i++) {
+      out[i] = _secureRandom.nextInt(256);
+    }
+    return out;
   }
 }

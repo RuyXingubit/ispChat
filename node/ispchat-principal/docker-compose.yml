@@ -1,0 +1,101 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: ispchat-principal-postgres
+    restart: always
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-ispchat_principal}
+      - POSTGRES_USER=${POSTGRES_USER:-ispchat}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD obrigatorio}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-ispchat} -d $${POSTGRES_DB:-ispchat_principal}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - principal-pg-data:/var/lib/postgresql/data
+    networks:
+      - ispchat-principal-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: ispchat-principal-redis
+    restart: always
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - principal-redis-data:/data
+    networks:
+      - ispchat-principal-net
+
+  principal:
+    build:
+      context: ..
+      dockerfile: ispchat-principal/Dockerfile
+    container_name: ispchat-principal
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "443:8443/tcp"
+    environment:
+      - ISPCHAT_GRPC_PORT=8443
+      - ISPCHAT_DB_URL=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-ispchat_principal}
+      - ISPCHAT_DB_USER=${POSTGRES_USER:-ispchat}
+      - ISPCHAT_DB_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD obrigatorio}
+      - SPRING_DATA_REDIS_HOST=redis
+      - SPRING_DATA_REDIS_PORT=6379
+      - ISPCHAT_PRINCIPAL_PUBLIC_ADDRESS=${ISPCHAT_PRINCIPAL_PUBLIC_ADDRESS:-principal.ispchat.dev.br:443}
+      - ISPCHAT_DHT_NODE_ID=${ISPCHAT_DHT_NODE_ID:-01950000-0000-7000-8000-000000000000}
+      - ISPCHAT_SRV_DOMAIN=${ISPCHAT_SRV_DOMAIN:-_ispchat._tcp.ispchat.dev.br}
+      - ISPCHAT_ROOT_PUBLIC_KEY=${ISPCHAT_ROOT_PUBLIC_KEY:?ISPCHAT_ROOT_PUBLIC_KEY obrigatorio}
+      - ISPCHAT_PRINCIPAL_SIGNING_PRIVATE_KEY=${ISPCHAT_PRINCIPAL_SIGNING_PRIVATE_KEY:?ISPCHAT_PRINCIPAL_SIGNING_PRIVATE_KEY obrigatorio}
+      - ISPCHAT_PRINCIPAL_SIGNING_CERT_B64=${ISPCHAT_PRINCIPAL_SIGNING_CERT_B64:?ISPCHAT_PRINCIPAL_SIGNING_CERT_B64 obrigatorio}
+      - ISPCHAT_PRINCIPAL_PEPPER=${ISPCHAT_PRINCIPAL_PEPPER:?ISPCHAT_PRINCIPAL_PEPPER obrigatorio}
+      - ISPCHAT_TURN_SECRET=${TURN_STATIC_AUTH_SECRET:?TURN_STATIC_AUTH_SECRET obrigatorio}
+      - ISPCHAT_TURN_URIS=${ISPCHAT_TURN_URIS:-}
+      - ISPCHAT_CA_CERT_PATH=/certs/ca.crt
+      - ISPCHAT_NODE_CERT_PATH=/certs/principal.crt
+      - ISPCHAT_NODE_KEY_PATH=/certs/principal.key
+      - ISPCHAT_DEV_MODE=false
+    volumes:
+      - ../certs:/certs:ro
+    networks:
+      - ispchat-principal-net
+
+  coturn:
+    image: coturn/coturn:latest
+    container_name: ispchat-principal-coturn
+    restart: always
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "5349:5349/tcp"
+      - "5349:5349/udp"
+      - "49152-50152:49152-50152/udp"
+    command:
+      - "-c"
+      - "/etc/coturn/turnserver.conf"
+      - "--realm=${ISP_DOMAIN:-ispchat.dev.br}"
+      - "--external-ip=${PRINCIPAL_EXTERNAL_IP:-127.0.0.1}"
+      - "--static-auth-secret=${TURN_STATIC_AUTH_SECRET:?TURN_STATIC_AUTH_SECRET obrigatorio}"
+    volumes:
+      - ../turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ../certs:/certs:ro
+    networks:
+      - ispchat-principal-net
+
+volumes:
+  principal-pg-data:
+  principal-redis-data:
+
+networks:
+  ispchat-principal-net:
+    driver: bridge

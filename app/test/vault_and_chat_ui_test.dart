@@ -1,167 +1,196 @@
-import 'dart:typed_data';
-
-import 'package:flutter/material.dart';
-import 'package:flutter_test/flutter_test.dart';
 import 'package:app/core/crypto/identity_crypto_service.dart';
+import 'package:app/core/discovery/dns_srv_resolver.dart';
+import 'package:app/core/discovery/node_discovery_service.dart';
+import 'package:app/core/grpc/generated/ispchat.pbgrpc.dart';
+import 'package:app/core/grpc/ispchat_node_client.dart';
 import 'package:app/core/storage/secure_local_vault.dart';
 import 'package:app/main.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+class _InProcessUiNodeClient extends IspChatNodeClient {
+  bool _connected = false;
+  String? _address;
+  final List<ClientEnvelope> sentEnvelopes = <ClientEnvelope>[];
+
+  @override
+  bool get isConnected => _connected;
+
+  @override
+  String? get connectedNodeAddress => _address;
+
+  @override
+  Future<void> connectToAddress(
+    String nodeAddress, {
+    bool useTls = true,
+    dynamic tlsCredentials,
+    String? principalAddress,
+    bool routeGovernanceThroughEdgeChannel = false,
+  }) async {
+    _connected = true;
+    _address = nodeAddress.trim();
+  }
+
+  @override
+  Future<RegisterSessionResponse> registerSession(
+    RegisterSessionRequest request,
+  ) async {
+    return RegisterSessionResponse()..success = true;
+  }
+
+  @override
+  Future<FindUserSessionsResponse> findUserSessions(String targetUuid) async {
+    return FindUserSessionsResponse();
+  }
+
+  @override
+  Future<void> openMessageStream({
+    ClientEnvelope? initialHandshake,
+    Future<void> Function()? onReconnected,
+  }) async {}
+
+  @override
+  Future<void> sendEnvelope(ClientEnvelope envelope) async {
+    sentEnvelopes.add(envelope);
+  }
+
+  @override
+  Future<void> disconnect() async {
+    _connected = false;
+    _address = null;
+  }
+}
+
+class _AlwaysFastProbe implements LatencyProbe {
+  @override
+  Future<int?> measureLatencyMs(
+    String nodeAddress, {
+    Duration timeout = const Duration(seconds: 2),
+  }) async {
+    return 7;
+  }
+}
 
 void main() {
-  group('SecureLocalVault Unit Tests', () {
-    late IdentityCryptoService crypto;
-    late InMemorySecureKeyValueStore store;
-    late SecureLocalVault vault;
+  test('SecureLocalVault persists V2 credentials, devices, and contacts',
+      () async {
+    const crypto = IdentityCryptoService();
+    final alice = await crypto.generateNewIdentity();
+    final bob = await crypto.generateNewIdentity();
+    final bobNew = await crypto.generateNewIdentity();
+    final store = InMemorySecureKeyValueStore();
+    final vault = SecureLocalVault(store: store);
 
-    setUp(() {
-      crypto = IdentityCryptoService();
-      store = InMemorySecureKeyValueStore();
-      vault = SecureLocalVault(store: store, cryptoService: crypto);
-    });
+    await vault.saveMnemonic(alice.mnemonic);
+    expect((await vault.restoreSavedIdentity(crypto))?.userUuid, alice.userUuid);
 
-    test('Persiste e restaura identidade, contatos, blocklist, seeds e chat E2E', () async {
-      final UserIdentity alice = await crypto.generateNewIdentity();
-      final UserIdentity bob = await crypto.generateNewIdentity();
+    await vault.saveContact(
+      ContactBundle(
+        uuid: bob.userUuid,
+        ed25519PublicKey: bob.ed25519PublicKeyBytes,
+        x25519PublicKey: bob.x25519PublicKeyBytes,
+        displayName: 'Bob',
+        isVerified: true,
+        publicCnpj: '12ABC34501DE35',
+      ),
+    );
+    await vault.appendChatMessage(
+      StoredChatMessage(
+        messageId: IdentityCryptoService.generateTemporalUuidV7(),
+        peerUuid: bob.userUuid,
+        senderUuid: bob.userUuid,
+        text: 'Antes do rebind',
+        isOutgoing: false,
+        timestampMs: 1700000000000,
+      ),
+    );
 
-      // 1. Identidade
-      await vault.saveIdentityMnemonic(alice.mnemonic);
-      final UserIdentity? loadedAlice = await vault.loadSavedIdentity();
-      expect(loadedAlice, isNotNull);
-      expect(loadedAlice!.userUuid, equals(alice.userUuid));
-      expect(loadedAlice.ed25519PublicKeyBytes, equals(alice.ed25519PublicKeyBytes));
+    await vault.migrateReplacedContact(
+      oldUserUuid: bob.userUuid,
+      updatedContact: ContactBundle(
+        uuid: bobNew.userUuid,
+        ed25519PublicKey: bobNew.ed25519PublicKeyBytes,
+        x25519PublicKey: bobNew.x25519PublicKeyBytes,
+        displayName: 'Bob',
+        isVerified: true,
+      ),
+    );
+    expect(await vault.loadChatMessages(bob.userUuid), isEmpty);
+    expect((await vault.loadChatMessages(bobNew.userUuid)).first.text, 'Antes do rebind');
 
-      // 2. Contatos (incluindo rejeicao de contato com chave adulterada)
-      final ContactBundle bobBundle = ContactBundle(
-        userUuid: bob.userUuid,
-        ed25519PublicKeyBytes: bob.ed25519PublicKeyBytes,
-        x25519PublicKeyBytes: bob.x25519PublicKeyBytes,
-        directIpv6Address: '2804:14d:1:2::99',
-      );
-      final ContactBundle spoofedBundle = ContactBundle(
-        userUuid: bob.userUuid,
-        ed25519PublicKeyBytes: Uint8List(32), // Chave invalida para o UUID de Bob
-        x25519PublicKeyBytes: bob.x25519PublicKeyBytes,
-      );
-
-      await vault.saveContacts(<ContactBundle>[bobBundle, spoofedBundle]);
-      final List<ContactBundle> loadedContacts = await vault.loadContacts();
-      expect(loadedContacts.length, equals(1));
-      expect(loadedContacts.first.userUuid, equals(bob.userUuid));
-      expect(loadedContacts.first.directIpv6Address, equals('2804:14d:1:2::99'));
-
-      // 3. Blocklist e Seeds
-      await vault.saveBlockedUuids(<String>{'0195f3a0-0000-7000-8000-000000000099'});
-      expect(await vault.loadBlockedUuids(), contains('0195f3a0-0000-7000-8000-000000000099'));
-
-      await vault.saveSeedNodes(<String>['200.160.2.3', '2804:14d:1::10']);
-      expect(await vault.loadSeedNodes(), equals(<String>['200.160.2.3', '2804:14d:1::10']));
-
-      // 4. Historico de Mensagens E2E
-      final StoredChatMessage msg = StoredChatMessage(
-        messageId: crypto.generateTemporalUuidV7(),
-        senderUuid: alice.userUuid,
-        receiverUuid: bob.userUuid,
-        text: 'Mensagem persistida no cofre local',
-        timestampMillis: 1743465600000,
-        isOutgoing: true,
-      );
-      await vault.appendChatMessage(bob.userUuid, msg);
-
-      final List<StoredChatMessage> chatHistory = await vault.loadChatMessages(bob.userUuid);
-      expect(chatHistory.length, equals(1));
-      expect(chatHistory.first.text, equals('Mensagem persistida no cofre local'));
-      expect(chatHistory.first.messageId, equals(msg.messageId));
-    });
+    await vault.saveBlockedUuids([bob.userUuid]);
+    expect(await vault.loadBlockedUuids(), [bob.userUuid]);
+    await vault.saveBootstrapSeeds(['127.0.0.1:8443']);
+    expect(await vault.loadBootstrapSeeds(), ['127.0.0.1:8443']);
   });
 
-  group('QR Dialog, Vault Hydration & ContactChatScreen Widget Tests', () {
-    testWidgets(
-      'Hidrata estado do cofre, exibe QR Code Doomsday e conversa/liga na ContactChatScreen sem overflow',
-      (WidgetTester tester) async {
-        final IdentityCryptoService crypto = IdentityCryptoService();
-        final UserIdentity alice = await crypto.generateNewIdentity();
-        final UserIdentity bob = await crypto.generateNewIdentity();
-
-        final InMemorySecureKeyValueStore memoryStore = InMemorySecureKeyValueStore();
-        final SecureLocalVault seedVault = SecureLocalVault(
-          store: memoryStore,
-          cryptoService: crypto,
-        );
-
-        // Pre-popula o cofre com a identidade da Alice e o contato do Bob (com IPv6 Doomsday)
-        await seedVault.saveIdentityMnemonic(alice.mnemonic);
-        await seedVault.saveContacts(<ContactBundle>[
-          ContactBundle(
-            userUuid: bob.userUuid,
-            ed25519PublicKeyBytes: bob.ed25519PublicKeyBytes,
-            x25519PublicKeyBytes: bob.x25519PublicKeyBytes,
-            directIpv6Address: '2804:14d:1:2::77',
-          ),
-        ]);
-
-        await tester.pumpWidget(IspChatApp(customSecureStore: memoryStore));
-        await tester.pumpAndSettle();
-
-        // Verifica que a identidade da Alice e o contato do Bob foram hidratados automaticamente
-        expect(find.byKey(const Key('txt_user_uuid')), findsOneWidget);
-        expect(find.text(alice.userUuid), findsOneWidget);
-        expect(find.byKey(Key('contact_tile_${bob.userUuid}')), findsOneWidget);
-
-        // Abre o Dialogo de QR Code e ativa o Modo Doomsday IPv6
-        final Finder qrBtn = find.byKey(const Key('btn_show_qr_code'));
-        await tester.ensureVisible(qrBtn);
-        await tester.tap(qrBtn);
-        await tester.pumpAndSettle();
-
-        expect(find.text('QR Code de Identidade & Modo Doomsday'), findsOneWidget);
-        await tester.tap(find.byKey(const Key('switch_doomsday_ipv6')));
-        await tester.pumpAndSettle();
-
-        await tester.enterText(
-          find.byKey(const Key('input_doomsday_ipv6')),
-          '2804:14d:99::1',
-        );
-        await tester.pumpAndSettle();
-        expect(find.textContaining('2804%3A14d%3A99%3A%3A1'), findsOneWidget);
-
-        // Fecha o dialogo
-        await tester.tap(find.byIcon(Icons.close));
-        await tester.pumpAndSettle();
-
-        // Toca no contato do Bob para abrir a ContactChatScreen
-        final Finder bobTile = find.byKey(Key('contact_tile_${bob.userUuid}'));
-        await tester.ensureVisible(bobTile);
-        await tester.tap(bobTile);
-        await tester.pumpAndSettle();
-
-        expect(find.text('Chat E2E Verificado'), findsOneWidget);
-        expect(
-          find.textContaining('Rota Doomsday IPv6 Direta disponivel: 2804:14d:1:2::77'),
-          findsOneWidget,
-        );
-
-        // Envia uma mensagem E2E
-        await tester.enterText(
-          find.byKey(const Key('input_chat_message')),
-          'Oi Bob, testando chat E2E!',
-        );
-        await tester.tap(find.byKey(const Key('btn_send_chat_message')));
-        await tester.pumpAndSettle();
-
-        expect(find.text('Oi Bob, testando chat E2E!'), findsOneWidget);
-        expect(find.textContaining('Pacote E2E assinado'), findsOneWidget);
-
-        // Inicia uma chamada de voz WebRTC E2E e depois encerra
-        await tester.tap(find.byKey(const Key('btn_start_audio_call')));
-        await tester.pumpAndSettle();
-
-        expect(find.byKey(const Key('txt_active_call_status')), findsOneWidget);
-        expect(find.textContaining('ringingOutgoing'), findsOneWidget);
-
-        await tester.tap(find.byKey(const Key('btn_hangup_call')));
-        await tester.pumpAndSettle();
-
-        expect(find.textContaining('Chamada encerrada'), findsOneWidget);
-      },
+  testWidgets(
+      'Main UI generates identity, adds contact, connects to local node, and opens chat',
+      (tester) async {
+    const crypto = IdentityCryptoService();
+    final peer = await crypto.generateNewIdentity();
+    final peerUri = await crypto.buildSignedContactUri(
+      identity: peer,
+      displayName: 'Peer Contato',
     );
+
+    final fakeClient = _InProcessUiNodeClient();
+    final store = InMemorySecureKeyValueStore();
+    tester.view.physicalSize = const Size(1024, 768);
+    tester.view.devicePixelRatio = 1.0;
+
+    try {
+      await tester.pumpWidget(
+        IspChatApp(
+          customSecureStore: store,
+          customNodeClient: fakeClient,
+          customLatencyProbe: _AlwaysFastProbe(),
+          customDnsSrvResolver: DnsSrvResolver(
+            endpoints: const [],
+          ),
+          testNodePortOverride: 8443,
+          useInsecureLocalTestTransport: true,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('btn_generate_identity')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('txt_user_uuid')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('btn_elect_and_connect_node')));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<Text>(find.byKey(const Key('txt_connected_node_host'))).data,
+        '127.0.0.1:8443',
+      );
+
+      await tester.enterText(
+        find.byKey(const Key('input_contact_uri')),
+        peerUri,
+      );
+      await tester.tap(find.byKey(const Key('btn_add_contact')));
+      await tester.pumpAndSettle();
+
+      final tileFinder = find.byKey(Key('contact_tile_${peer.userUuid}'));
+      expect(tileFinder, findsOneWidget);
+      await tester.tap(tileFinder);
+      await tester.pumpAndSettle();
+
+      await tester.enterText(
+        find.byKey(const Key('input_chat_message')),
+        'Mensagem na conversa',
+      );
+      await tester.tap(find.byKey(const Key('btn_send_message')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Mensagem na conversa'), findsOneWidget);
+      expect(fakeClient.sentEnvelopes.length, 1);
+      expect(tester.takeException(), isNull);
+    } finally {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+      await fakeClient.dispose();
+    }
   });
 }

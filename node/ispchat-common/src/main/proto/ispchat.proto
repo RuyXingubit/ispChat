@@ -1,0 +1,513 @@
+syntax = "proto3";
+
+package br.dev.ispchat.grpc;
+
+option java_multiple_files = true;
+option java_package = "br.dev.ispchat.grpc";
+option java_outer_classname = "IspChatProto";
+
+// Tipos de mensagens e eventos trafegados na rede
+enum MessageType {
+  UNKNOWN = 0;
+  TEXT = 1;               // Mensagem de texto criptografada E2E (X25519 + cifra autenticada)
+  RING = 2;               // Notificacao de chamada telefonica (disparo multi-device)
+  SDP_OFFER = 3;          // Sinalizacao WebRTC (Metadados E2E)
+  SDP_ANSWER = 4;         // Sinalizacao WebRTC (Metadados E2E)
+  ICE_CANDIDATE = 5;      // Estabelecimento de rotas NAT WebRTC
+  CALL_DECLINE = 6;       // Recusa/encerramento de chamada
+  AUTH_HANDSHAKE = 7;     // Pacote inicial de autenticacao Ed25519 ao abrir stream Connect
+  SERVER_QUEUED_ACK = 8;  // Confirmacao do No Casa de persistencia em fila offline
+  DELIVERY_ACK = 9;       // Confirmacao assinada pelo dispositivo destinatario apos persistir no cofre
+  DELIVERY_ERROR = 10;    // Notificacao de falha de entrega / rejeicao de politica
+  IDENTITY_REPLACED = 11; // Aviso assinado pelo Principal informando rotacao auditada de UUIDv7 (CPF Re-Bind)
+  REVOCATION_NOTICE = 12; // Aviso imediato de revogacao de conta ou dispositivo delegado
+}
+
+// Papel criptografico do dispositivo na conta
+enum DeviceRole {
+  MOBILE_ROOT = 0; // Aparelho movel detentor da semente BIP39 raiz (CPF ou CNPJ Admin)
+  DESKTOP = 1;     // Estacao de trabalho pareada via QR Code (DeviceDelegationCert)
+  ERP_API = 2;     // Sidecar ispchat-erp-bridge pareado na LAN privada do provedor
+}
+
+// Tipo de documento verificado na Cadeia de Confianca (Chain of Trust)
+enum DocumentType {
+  DOC_UNKNOWN = 0;
+  CPF = 1;  // 11 digitos numericos ASCII (nunca listado publicamente)
+  CNPJ = 2; // 14 caracteres alfanumericos ASCII (IN RFB 2229/2024; listado no diretorio publico)
+}
+
+// Resultado detalhado do roteamento inter-provedores / No Casa
+enum DeliveryStatus {
+  DELIVERY_UNKNOWN = 0;
+  LIVE_DELIVERED = 1;
+  HOME_QUEUED = 2;
+  REDIRECT_REQUIRED = 3;
+  REJECTED = 4;
+}
+
+// =========================================================================
+// CERTIFICADOS CRIPTOGRAFICOS E ESTRUTURAS MULTI-DISPOSITIVO V2
+// =========================================================================
+
+// Certificado do servidor Principal assinado offline pela chave Raiz Nivel 0
+message PrincipalSigningCert {
+  string cert_id = 1;              // UUIDv7 temporal
+  bytes principal_ed25519_pub = 2; // Chave publica Ed25519 online do ispchat-principal (32 bytes)
+  bytes escrow_x25519_pub = 3;     // Chave publica X25519 offline de custodia judicial (32 bytes)
+  int64 issued_at_ms = 4;
+  int64 expires_at_ms = 5;         // TTL padrao de 1 ano
+  bytes root_signature = 6;        // Assinatura Ed25519 sobre ISPCHAT-ROOT-PRIN-V1
+}
+
+// Credencial auto-contida de conta verificada (validavel em memoria pelos nos ISP)
+message VerificationCredential {
+  string credential_id = 1;        // UUIDv7 temporal
+  string user_uuid = 2;            // UUIDv7 deterministico da conta (CPF ou CNPJ)
+  bytes root_ed25519_pub = 3;      // Chave publica Ed25519 raiz da conta (32 bytes)
+  bytes root_x25519_pub = 4;       // Chave publica X25519 raiz da conta (32 bytes)
+  DocumentType doc_type = 5;
+  string public_cnpj = 6;          // Preenchido apenas quando doc_type == CNPJ; vazio para CPF
+  string public_display_name = 7;  // Nome fantasia publico apenas para CNPJ
+  string verifying_isp_cnpj = 8;   // CNPJ do provedor responsavel pela verificacao
+  string verifying_isp_name = 9;
+  string home_node_address = 10;   // Endereco host:port do No Casa atual
+  int64 routing_epoch = 11;        // Epoca monotona incrementada a cada portabilidade
+  int64 issued_at_ms = 12;
+  int64 expires_at_ms = 13;        // TTL de 90 dias (renovado aos 60 dias via GetOrRenewCredential)
+  bytes principal_signature = 14;  // Assinatura Ed25519 sobre ISPCHAT-CRED-V1
+  PrincipalSigningCert principal_cert = 15;
+}
+
+// Certificado de delegacao de sub-chave (DESKTOP ou ERP_API) assinado pela chave raiz movel
+message DeviceDelegationCert {
+  string cert_id = 1;              // UUIDv7 temporal
+  string user_uuid = 2;            // UUIDv7 da conta raiz
+  string device_id = 3;            // UUIDv7 deterministico derivado de device_ed25519_pub
+  DeviceRole role = 4;
+  bytes device_ed25519_pub = 5;    // 32 bytes raw
+  bytes device_x25519_pub = 6;     // 32 bytes raw
+  int64 issued_at_ms = 7;
+  int64 expires_at_ms = 8;         // Maximo 90 dias
+  bytes root_signature = 9;        // Assinatura Ed25519 da raiz sobre ISPCHAT-DELEGATE-V1
+}
+
+// Declaracao autenticada do No Casa responsavel pela fila offline da conta
+message HomeNodeClaim {
+  string user_uuid = 1;
+  string home_node_address = 2;
+  int64 routing_epoch = 3;
+  int64 issued_at_ms = 4;
+  bytes claim_signature = 5;       // Assinatura Ed25519 sobre ISPCHAT-HOME-V1
+  bool signed_by_principal = 6;    // Obrigatorio true quando home_node_address e um No de Provedor Parceiro
+}
+
+// Chave simetrica de conteudo embrulhada individualmente para um device_id alvo
+message WrappedContentKey {
+  string target_device_id = 1;     // UUIDv7 do dispositivo destinatario (ou irmao do remetente)
+  bytes wrapped_key_blob = 2;      // [wrap_nonce(12) || encrypted_key(32) || poly1305_tag(16)] = 60 bytes
+}
+
+// Carga util E2E multi-dispositivo (ChaCha20-Poly1305 + X25519 HKDF-SHA256 key wrapping)
+message MultiDeviceEncryptedPayload {
+  bytes ephemeral_x25519_pub = 1;  // 32 bytes raw
+  bytes content_nonce = 2;         // 12 bytes
+  bytes ciphertext_with_tag = 3;   // [ciphertext || poly1305_tag(16)]
+  repeated WrappedContentKey wrapped_keys = 4;
+}
+
+// Aviso assinado pelo Principal comunicando rotacao auditada de UUIDv7 por perda de aparelho
+message IdentityReplacementNotice {
+  string revocation_id = 1;        // UUIDv7 da revogacao associada
+  string old_user_uuid = 2;
+  string new_user_uuid = 3;
+  string verifying_isp_cnpj = 4;
+  int64 replaced_at_ms = 5;
+  bytes principal_signature = 6;   // Assinatura Ed25519 sobre ISPCHAT-REPLACE-V1
+}
+
+// Evento monotono do feed de revogacoes (conta, colaborador ou dispositivo delegado)
+message RevocationEvent {
+  string revocation_id = 1;        // UUIDv7 chave primaria
+  int64 revocation_seq = 2;        // Cursor sequencial monotono para StreamRevocations
+  string target_uuid = 3;          // user_uuid ou collaborator_uuid revogado
+  string revoked_device_id = 4;    // Preenchido apenas quando revogando um dispositivo secundario especifico
+  string reason = 5;
+  int64 created_at_ms = 6;
+  bytes principal_signature = 7;   // Assinatura Ed25519 sobre ISPCHAT-REVOKE-V1
+  IdentityReplacementNotice replacement_notice = 8;
+}
+
+// Credencial de colaborador verificado assinada por um Socio Administrador do ISP
+message CollaboratorAuthCert {
+  string cert_id = 1;              // UUIDv7 temporal
+  string isp_cnpj = 2;
+  string partner_uuid = 3;         // UUIDv7 do Socio Administrador signatario
+  string collaborator_uuid = 4;    // UUIDv7 do colaborador autorizado
+  bytes collab_cpf_sha256 = 5;     // SHA-256(normalized_cpf) de 32 bytes
+  bytes collab_ed25519_pub = 6;    // 32 bytes raw
+  int64 issued_at_ms = 7;
+  int64 expires_at_ms = 8;         // Maximo 1 ano
+  bytes partner_signature = 9;     // Assinatura Ed25519 sobre ISPCHAT-CHAIN-COLLAB-V1
+}
+
+// =========================================================================
+// FRONTEIRA DE BORDA (App Flutter <-> No Local - Porta 443 TLS + Ed25519)
+// =========================================================================
+
+// 1. DhtClientService (Gerenciamento de Presenca pelo App)
+service DhtClientService {
+  // App notifica o No: "Estou online. Anuncie minha presenca na DHT"
+  // Validacao obrigatoria: deriveUuidV7(public_key) == user_uuid (V1) ou ISPCHAT-DHT-V2 + DeviceDelegationCert (V2)
+  rpc RegisterSession (RegisterSessionRequest) returns (RegisterSessionResponse);
+
+  // App consulta o No para descobrir sessoes de dispositivos e HomeNodeClaim do destinatario
+  rpc FindUserSessions (FindUserSessionsRequest) returns (FindUserSessionsResponse);
+}
+
+message RegisterSessionRequest {
+  string user_uuid = 1;        // Identidade deterministica: UUIDv7 derivado de SHA-256(root_ed25519_pub)
+  string node_address = 2;     // IP/Hostname do no host (porta 443)
+  bytes public_key = 3;        // Chave publica Ed25519 do dispositivo ativo (32 bytes raw)
+  bytes x25519_public_key = 4; // Chave publica X25519 do dispositivo ativo (32 bytes raw)
+  bytes signature = 5;         // Assinatura digital Ed25519 (64 bytes; ISPCHAT-DHT-V1 ou ISPCHAT-DHT-V2)
+  int64 timestamp = 6;         // Unix epoch em milissegundos (janela anti-replay +/- 5 min)
+  string device_id = 7;        // UUIDv7 do dispositivo (igual a user_uuid em MOBILE_ROOT)
+  bytes root_ed25519_pub = 8;  // Chave publica Ed25519 raiz da conta (32 bytes raw)
+  DeviceDelegationCert delegation_cert = 9;
+  VerificationCredential verification_credential = 10;
+  HomeNodeClaim home_node_claim = 11;
+}
+
+message RegisterSessionResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message FindUserSessionsRequest {
+  string target_uuid = 1;      // UUIDv7 buscado
+}
+
+message UserSessionInfo {
+  string node_address = 1;     // Ex: "node-sp.isp.com:443"
+  bytes ed25519_public_key = 2;
+  bytes x25519_public_key = 3;
+  int64 timestamp = 4;
+  string device_id = 5;
+  bytes root_ed25519_pub = 6;
+  bytes device_ed25519_pub = 7;
+  bytes session_signature = 8; // Assinatura Ed25519 sobre ISPCHAT-DHT-V2 autenticando x25519_public_key
+  DeviceDelegationCert delegation_cert = 9;
+  VerificationCredential verification_credential = 10;
+}
+
+message FindUserSessionsResponse {
+  repeated string node_addresses = 1;
+  repeated UserSessionInfo sessions = 2;
+  HomeNodeClaim home_node_claim = 3;
+  IdentityReplacementNotice replacement_notice = 4;
+}
+
+// 2. ClientStreamService (Stream Bidirecional App Flutter <-> No Local)
+service ClientStreamService {
+  // O primeiro pacote enviado pelo App deve ser MessageType.AUTH_HANDSHAKE assinado.
+  // Aceita ISPCHAT-MSG-V1 (legado/unverified) ou ISPCHAT-MSG-V2 (multi-dispositivo/verificado).
+  rpc Connect (stream ClientEnvelope) returns (stream ServerEnvelope);
+}
+
+message ClientEnvelope {
+  string message_id = 1;        // UUIDv7 temporal da mensagem/evento
+  string sender_uuid = 2;       // UUIDv7 deterministico da conta remetente
+  string receiver_uuid = 3;     // UUIDv7 deterministico da conta destinataria
+  MessageType type = 4;
+  bytes encrypted_payload = 5;  // Carga opaca criptografada E2E (V1 ou MultiDeviceEncryptedPayload serializado)
+  bytes sender_public_key = 6;  // Chave publica Ed25519 (32 bytes raw) do dispositivo remetente
+  bytes signature = 7;          // Assinatura Ed25519 garantindo autenticidade e integridade
+  int64 timestamp = 8;          // Unix epoch em milissegundos
+  string sender_device_id = 9;
+  DeviceDelegationCert sender_delegation_cert = 10;
+  VerificationCredential sender_verification_credential = 11;
+  string ref_message_id = 12;   // ID da mensagem referenciada em DELIVERY_ACK / SERVER_QUEUED_ACK / DELIVERY_ERROR
+}
+
+message ServerEnvelope {
+  string message_id = 1;        // UUIDv7 temporal da mensagem/evento
+  string sender_uuid = 2;       // UUIDv7 deterministico da conta remetente
+  MessageType type = 3;
+  bytes encrypted_payload = 4;
+  bytes sender_public_key = 5;  // Chave publica Ed25519 do dispositivo remetente
+  bytes signature = 6;          // Assinatura original Ed25519 preservada ponta a ponta
+  int64 timestamp = 7;
+  string receiver_uuid = 8;     // UUIDv7 da conta destinataria (necessario para verificacao AAD em sibling sync)
+  string sender_device_id = 9;
+  DeviceDelegationCert sender_delegation_cert = 10;
+  VerificationCredential sender_verification_credential = 11;
+  string ref_message_id = 12;
+  IdentityReplacementNotice replacement_notice = 13;
+  RevocationEvent revocation_event = 14;
+}
+
+// =========================================================================
+// FRONTEIRA DE FEDERACAO (No ISP <-> No ISP - Porta 443 mTLS CA Obrigatorio)
+// =========================================================================
+
+// 3. DhtPeerService (Protocolo Kademlia entre Nos de Provedores via mTLS)
+service DhtPeerService {
+  rpc Ping (PingRequest) returns (PingResponse);
+  rpc Store (StoreRequest) returns (StoreResponse);
+  rpc FindNode (FindNodeRequest) returns (FindNodeResponse);
+  rpc FindValue (FindValueRequest) returns (FindValueResponse);
+}
+
+message PingRequest {
+  string sender_node_id = 1;
+  string sender_address = 2;
+}
+
+message PingResponse {
+  string responder_node_id = 1;
+}
+
+message StoreRequest {
+  string user_uuid = 1;         // Chave Kademlia: UUIDv7 deterministico do usuario
+  string node_address = 2;      // Endereco do No onde o usuario esta conectado
+  bytes public_key = 3;         // Chave publica Ed25519 (32 bytes)
+  bytes x25519_public_key = 4;  // Chave publica X25519 (32 bytes)
+  bytes signature = 5;          // Assinatura Ed25519 sobre ISPCHAT-DHT-V1 ou ISPCHAT-DHT-V2
+  int64 timestamp = 6;          // Timestamp para protecao anti-replay
+  string device_id = 7;
+  bytes root_ed25519_pub = 8;
+  DeviceDelegationCert delegation_cert = 9;
+  VerificationCredential verification_credential = 10;
+  HomeNodeClaim home_node_claim = 11;
+}
+
+message StoreResponse {
+  bool success = 1;
+}
+
+message NodeInfo {
+  string node_id = 1;
+  string node_address = 2;
+}
+
+message FindNodeRequest {
+  string target_id = 1;
+}
+
+message FindNodeResponse {
+  repeated NodeInfo closest_nodes = 1;
+}
+
+message FindValueRequest {
+  string target_uuid = 1;
+}
+
+message FindValueResponse {
+  repeated UserSessionInfo sessions = 1;
+  repeated NodeInfo closest_nodes = 2;
+  HomeNodeClaim home_node_claim = 3;
+  IdentityReplacementNotice replacement_notice = 4;
+}
+
+// 4. NodeRoutingService (Roteamento Cego de Payloads entre Provedores via mTLS)
+service NodeRoutingService {
+  rpc RoutePayload (RoutePayloadRequest) returns (RoutePayloadResponse);
+}
+
+message RoutePayloadRequest {
+  string message_id = 1;        // UUIDv7 temporal da mensagem
+  string sender_uuid = 2;       // UUIDv7 do remetente
+  string receiver_uuid = 3;     // UUIDv7 do destinatario
+  MessageType type = 4;
+  bytes encrypted_payload = 5;  // Carga opaca criptografada E2E
+  bytes sender_public_key = 6;  // Chave publica Ed25519 do dispositivo remetente
+  bytes signature = 7;          // Assinatura Ed25519 do remetente
+  int64 timestamp = 8;
+  string sender_device_id = 9;
+  DeviceDelegationCert sender_delegation_cert = 10;
+  VerificationCredential sender_verification_credential = 11;
+  string ref_message_id = 12;
+  uint32 hop_count = 13;        // Contador anti-loop para redirecionamentos de portabilidade (max_hops = 2)
+}
+
+message RoutePayloadResponse {
+  bool delivered = 1;                        // True = Entregue na stream ativa ou persistido na fila do No Casa
+  DeliveryStatus status = 2;
+  repeated string delivered_device_ids = 3;  // Dispositivos que receberam a mensagem em tempo real neste no
+  string redirect_home_node = 4;             // Preenchido quando status == REDIRECT_REQUIRED
+}
+
+// =========================================================================
+// SERVICOS DE MIDIA WEBRTC, DIRETORIO CNPJ E GOVERNANCA PRINCIPAL (V2)
+// =========================================================================
+
+// 5. TurnCredentialService (Credenciais Efemeras Coturn draft-uberti-behave-turn-rest)
+service TurnCredentialService {
+  rpc GetTurnCredentials (TurnCredentialRequest) returns (TurnCredentialResponse);
+}
+
+message TurnCredentialRequest {
+  string user_uuid = 1;
+  string device_id = 2;
+  int64 timestamp_ms = 3;
+  bytes caller_public_key = 4;
+  bytes signature = 5;          // Assinatura Ed25519 sobre ISPCHAT-TURN-REQ-V1 ou desafio equivalente
+  DeviceDelegationCert delegation_cert = 6;
+  VerificationCredential verification_credential = 7;
+}
+
+message TurnCredentialResponse {
+  repeated string uris = 1;
+  string username = 2;
+  string credential = 3;
+  int32 ttl_seconds = 4;
+  int32 max_bps = 5;
+}
+
+// 6. DirectoryService (Busca Publica Exclusiva de Contas Corporativas CNPJ Verificadas)
+service DirectoryService {
+  rpc SearchVerifiedCnpj (SearchCnpjRequest) returns (SearchCnpjResponse);
+}
+
+message SearchCnpjRequest {
+  string query = 1; // Prefixo/termo de CNPJ ou nome fantasia
+  int32 limit = 2;  // Limite de resultados (padrao 20, maximo 50)
+}
+
+message VerifiedCorporateEntry {
+  string corporate_uuid = 1;
+  string cnpj = 2;
+  string display_name = 3;
+  string home_node_address = 4;
+  bytes root_ed25519_pub = 5;
+  bytes root_x25519_pub = 6;
+  VerificationCredential verification_credential = 7;
+}
+
+message SearchCnpjResponse {
+  repeated VerifiedCorporateEntry entries = 1;
+}
+
+// 7. PrincipalGovernanceService (Governanca da Cadeia de Confianca e Feed de Revogacoes)
+service PrincipalGovernanceService {
+  rpc RegisterPartnerIsp (RegisterPartnerIspRequest) returns (GovernanceAck);
+  rpc AuthorizeCollaborator (AuthorizeCollaboratorRequest) returns (CollaboratorAuthCert);
+  rpc RevokeCollaborator (RevokeCollaboratorRequest) returns (RevocationEvent);
+  rpc SubmitVerification (SubmitVerificationRequest) returns (VerificationBundle);
+  rpc SubmitCpfRebind (SubmitCpfRebindRequest) returns (VerificationBundle);
+  rpc GetOrRenewCredential (GetCredentialRequest) returns (VerificationBundle);
+  rpc RevokeDevice (RevokeDeviceRequest) returns (RevocationEvent);
+  rpc PortAccount (PortAccountRequest) returns (VerificationBundle);
+  rpc StreamRevocations (StreamRevocationsRequest) returns (stream RevocationEvent);
+}
+
+message PartnerSeedEntry {
+  string partner_uuid = 1;
+  string partner_cpf = 2;
+  bytes partner_ed25519_pub = 3;
+  bytes partner_x25519_pub = 4;
+}
+
+message RegisterPartnerIspRequest {
+  string isp_cnpj = 1;
+  string trade_name = 2;
+  string corporate_uuid = 3;
+  bytes corp_root_ed25519_pub = 4;
+  bytes corp_root_x25519_pub = 5;
+  string node_address = 6;
+  repeated PartnerSeedEntry managing_partners = 7;
+  int64 issued_at_ms = 8;
+  bytes root_signature = 9; // Assinatura Ed25519 Nivel 0 sobre ISPCHAT-CHAIN-ISP-V1
+}
+
+message VerificationBundle {
+  VerificationCredential credential = 1;
+  HomeNodeClaim home_node_claim = 2;
+  IdentityReplacementNotice replacement_notice = 3;
+}
+
+message GovernanceAck {
+  bool accepted = 1;
+  string message = 2;
+  VerificationBundle corporate_bundle = 3;
+}
+
+message AuthorizeCollaboratorRequest {
+  CollaboratorAuthCert cert = 1;
+  string collaborator_cpf = 2;
+}
+
+message RevokeCollaboratorRequest {
+  string isp_cnpj = 1;
+  string partner_uuid = 2;
+  string collaborator_uuid = 3;
+  string reason = 4;
+  int64 timestamp_ms = 5;
+  bytes partner_signature = 6;
+}
+
+message UserVerificationConsent {
+  string user_uuid = 1;
+  bytes user_ed25519_pub = 2;
+  bytes user_x25519_pub = 3;
+  DocumentType doc_type = 4;
+  bytes doc_sha256 = 5;
+  string isp_cnpj = 6;
+  int64 timestamp_ms = 7;
+  bytes user_signature = 8; // Assinatura Ed25519 sobre ISPCHAT-VERIFY-REQ-V1
+}
+
+message SubmitVerificationRequest {
+  string isp_cnpj = 1;
+  CollaboratorAuthCert collaborator_cert = 2;
+  UserVerificationConsent user_consent = 3;
+  string normalized_document = 4;
+  string public_display_name = 5;
+  string home_node_address = 6;
+  int64 attested_at_ms = 7;
+  bytes collaborator_signature = 8; // Assinatura Ed25519 sobre ISPCHAT-CHAIN-USER-V1
+}
+
+message SubmitCpfRebindRequest {
+  string isp_cnpj = 1;
+  CollaboratorAuthCert collaborator_cert = 2;
+  string old_user_uuid = 3;
+  UserVerificationConsent new_user_consent = 4;
+  string normalized_cpf = 5;
+  string home_node_address = 6;
+  int64 attested_at_ms = 7;
+  bytes collaborator_signature = 8; // Assinatura Ed25519 sobre ISPCHAT-REBIND-V1
+}
+
+message GetCredentialRequest {
+  string user_uuid = 1;
+  string device_id = 2;
+  int64 timestamp_ms = 3;
+  bytes caller_public_key = 4;
+  bytes signature = 5;
+  DeviceDelegationCert delegation_cert = 6;
+}
+
+message RevokeDeviceRequest {
+  string user_uuid = 1;
+  string revoked_device_id = 2;
+  string reason = 3;
+  int64 timestamp_ms = 4;
+  bytes root_signature = 5;
+}
+
+message PortAccountRequest {
+  string user_uuid = 1;
+  string target_home_node_address = 2;
+  string target_isp_cnpj = 3;
+  int64 expected_routing_epoch = 4;
+  int64 timestamp_ms = 5;
+  bytes root_signature = 6;
+  CollaboratorAuthCert target_collaborator_cert = 7;
+  bytes target_collaborator_signature = 8;
+}
+
+message StreamRevocationsRequest {
+  int64 since_revocation_seq = 1;
+}

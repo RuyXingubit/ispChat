@@ -1,43 +1,20 @@
-# PRD (Product Requirements Document) - ISP Chat MVP
+# PRD — ispChat (Governança Federada, Dual-Tier & Mensageria P2P E2EE)
 
-## 1. Visão do Produto e Filosofia
-O **ISP Chat** é um ecossistema de comunicação descentralizado projetado para Provedores de Internet (ISPs). O objetivo primário é devolver a infraestrutura da internet para quem a constrói, eliminando a dependência de "Big Techs" e servidores centrais corporativos. A rede será P2P (Ponto a Ponto), federada entre os provedores, priorizando privacidade absoluta, segurança criptográfica e identidade auto-soberana.
+## 1. Problema & Visão de Produto
 
-## 2. Escopo do MVP (Minimum Viable Product)
-O MVP tem a missão de provar a viabilidade da comunicação inter-provedores (roteamento descentralizado) e a criptografia E2E sem um servidor central.
+O **ispChat** combina soberania criptográfica ponta a ponta com interoperabilidade federada entre Provedores de Serviços de Internet (ISPs), permitindo comunicação direta P2P entre usuários anônimos/livres e empresas ou assinantes verificados sem expor chaves privadas ou documentos pessoais em claro na rede.
 
-**O que ESTÁ no escopo:**
-- Identidade de usuário auto-soberana (UUIDv7 + Chaves Criptográficas).
-- Onboarding sem atrito via Descoberta DNS SRV e nós de fallback.
-- Rede de roteamento baseada em DHT (Kademlia).
-- Chamadas de Áudio e Vídeo (WebRTC) e Sinalização (gRPC).
-- Mensagens de Texto E2E (Online e Store-and-Forward Offline).
-- Bloqueio de contatos (Local Anti-Spam).
+## 2. Personas e Jornadas Principais (CUJs)
 
-**O que NÃO ESTÁ no escopo (Fase 2):**
-- Apache Kafka para chat em grupo/histórico infinito.
-- Criptografia de Limiar (Sistema de votação legal para quebra de sigilo por quórum).
-- Migração automatizada e portabilidade de dados entre provedores.
-- Backup Zero-Knowledge da lista de contatos/bloqueios no servidor.
+1. **Usuário Livre (Não Verificado)**: gera identidade BIP39 offline, conecta via DoH SRV (`_ispchat._tcp.ispchat.dev.br`) ou semente social, conversa via `MultiDeviceEncryptedPayload` e faz chamadas WebRTC sem entregar CPF/CNPJ.
+2. **Assinante ISP (CPF Verificado Privado)**: gera QR de consentimento assinado (`ISPCHAT-VERIFY-REQ-V1`) em loja/atendimento, recebe `VerificationCredential` (sem jamais publicar o CPF na rede) com selo verificável e Home Node dedicado.
+3. **Empresa / ISP (CNPJ Verificado Público)**: valida CNPJ numérico ou alfanumérico (IN RFB 2229/2024), aparece no Diretório Corporativo (`SearchVerifiedCnpj`) e opera múltiplas sessões delegadas (incluindo ERP via `ispchat-erp-bridge`).
+4. **Pareamento Multi-Dispositivo (Desktop / WebView / ERP)**: aparelho secundário exibe QR `ispchat://pair-req?...`; o celular Root assina `DeviceDelegationCert` sem nunca exportar a frase mnemônica de 12 palavras; dispositivos comprometidos podem ser revogados individualmente (`RevokeDevice`).
+5. **Rebind de CPF e Portabilidade de Provedor**: usuário que perdeu o dispositivo Root re-vincula o CPF presencialmente via colaborador autorizado (`SubmitCpfRebind` -> `IdentityReplacementNotice`) ou migra seu Home Node entre ISPs mantendo sua identidade (`PortAccount`).
 
-## 3. Identidade e Segurança (Criptografia)
-A identidade no ISP Chat resolve o problema do "Triângulo de Zooko", priorizando descentralização e segurança em detrimento de "aliases globais" fáceis, que poderiam ser fraudados em uma rede sem controle central.
+## 3. Requisitos Não-Funcionais Inegociáveis
 
-- **UUIDv7 (O Número da Conta):** A identidade pública do usuário. É o endereço que as outras pessoas usam para encontrá-lo.
-- **Par de Chaves (A Senha do Banco):** A verdadeira segurança reside na Chave Privada (gerada localmente no Secure Enclave/Keystore do celular). O UUID está matematicamente atrelado à Chave Pública. Nenhuma ação na rede (como fazer uma ligação ou atualizar o status) é aceita sem uma Assinatura Digital feita pela Chave Privada.
-- **Frase Semente (BIP39):** Para evitar a perda permanente da conta se o aparelho quebrar, o app gera uma Mnemônica de 12 palavras. O usuário anota essa frase, permitindo restaurar a exata mesma Chave Privada e UUID em novos dispositivos (celular, desktop).
-- **A Ausência de Aliases Globais (@nomes):** O compartilhamento de identidade ocorre de forma segura via **QR Code** ou **Deep Link**. O usuário que escaneia salva o contato *localmente* no seu aparelho com o nome que desejar, impedindo qualquer falsidade ideológica no diretório.
-
-## 4. Jornada do Usuário (Onboarding sem Atrito)
-O aplicativo Flutter realiza a descoberta do provedor de forma invisível:
-1. Ao abrir o app, ocorre uma consulta DNS SRV (`_ispchat._tcp.ispchat.dev.br`) para mapear os nós sementes da rede.
-2. O App testa a latência (ping) para descobrir se a rede Wi-Fi/4G atual possui um nó ISP Chat nativo.
-3. **Rede de Segurança (Fallback):** Se o usuário for cliente de um provedor que *ainda não* faz parte do ISP Chat, o aplicativo automaticamente o registra no Nó Público (Community Node) com o *menor ping* absoluto. Isso garante que qualquer pessoa possa usar o aplicativo desde o dia 1.
-
-## 5. Funcionalidades Core (User Stories Detalhadas)
-- **Compartilhamento Seguro:** Como usuário, eu quero exibir um QR Code ou enviar um Link Mágico para que amigos possam me adicionar, garantindo que ninguém se passe por mim usando meu nome.
-- **Voz e Vídeo E2E:** Como usuário, eu quero fazer chamadas de áudio e vídeo blindadas por WebRTC. A segurança deve ser garantida pelas minhas chaves locais.
-- **Chat de Texto (Online):** Como usuário, eu quero enviar mensagens de texto que são criptografadas no meu celular com a Chave Pública do destinatário, e transmitidas quase instantaneamente.
-- **Fila Offline:** Como usuário, se eu enviar uma mensagem e meu amigo estiver sem internet, quero que o provedor de destino guarde a mensagem (criptografada) e a entregue assim que ele abrir o aplicativo.
-- **Multi-dispositivos:** Como usuário, quero restaurar minhas 12 palavras no meu Celular e PC. Se alguém me ligar, a rede deve fazer os dois aparelhos tocarem simultaneamente, conectando a ligação com aquele que eu atender primeiro.
-- **Bloqueio de Assédio (Privado):** Como usuário, quero bloquear UUIDs indesejados. O bloqueio ocorrerá silenciosamente no meu aparelho, derrubando a ligação antes de tocar. Meu provedor não saberá quem eu bloqueei.
+- **Zero Dados Falsos na UI**: estados vazios limpos e neutros enquanto não houver conexão/busca real.
+- **Tolerância Zero a Quebras de Layout**: compatibilidade verificada em `320x568` (mobile compacto) e `1024x768` (desktop).
+- **Segurança Fail-Closed**: chaves públicas Root injetadas via `--dart-define=ISPCHAT_ROOT_PUBKEY_B64`; credenciais e delegações não verificadas são rejeitadas antes da descriptografia ou persistência de contato.
+- **UUIDv7 Universal**: todos os identificadores temporais e determinísticos de identidade seguem RFC 9562 v7.

@@ -1,46 +1,45 @@
-# 🌐 ISP Chat
+# ispChat — Mensageria E2EE P2P Soberana & Governança Federada de ISPs
 
-Bem-vindo ao **ISP Chat** — Uma rede de comunicação descentralizada, anti-censura e mantida exclusivamente por Provedores de Internet (ISPs).
+Arquitetura multi-módulo composta por infraestrutura Java 25 LTS (Edge Nodes gRPC/mTLS + Principal Governance + Gateway ERP) e cliente multiplataforma Flutter (Android, iOS, macOS, Linux, Windows).
 
-> **A Internet de volta para as mãos de quem a constrói.**
-> O ISP Chat é um ecossistema P2P (Ponto a Ponto) de código aberto que permite comunicação de áudio, vídeo e texto com privacidade absoluta, projetado para sobreviver a perseguições estatais e sem depender de servidores centrais.
+## Visão Geral da Arquitetura
 
----
+- **Identidade Soberana (BIP39 + Ed25519 + X25519 + UUIDv7 RFC 9562)**:
+  - Toda identidade raiz nasce no dispositivo (ou hardware) a partir de frase mnemônica BIP39, derivando chaves Ed25519 (assinatura) e X25519 (troca de chaves) e um `UUIDv7` determinístico vinculado à chave pública (`SHA-256(ed25519_pub)` com versão `7` e variante `2`).
+  - Delegação multi-dispositivo sem exportar a frase raiz: o celular Root assina um `DeviceDelegationCert` via QR/URI para Desktops (`DESKTOP`) ou sistemas corporativos (`ERP_API`).
+- **Modelo Dual-Tier & Cadeia de Confiança (4 Níveis)**:
+  - **Modo Livre (Não Verificado)**: uso P2P completo sem KYC obrigatório, com rate-limit conservador em Edge Nodes e `HomeNodeClaim` auto-assinado (`routingEpoch = 0`).
+  - **Modo Verificado (CPF ou CNPJ Alfanumérico IN RFB 2229/2024)**: atestação presencial ou via gateway ERP de ISP parceiro. O CPF permanece estritamente privado (apenas HMAC/sha256 e custódia cifrada sob AES-GCM/X25519 para auditoria legal); o CNPJ corporativo é publicável no diretório (`DirectoryService`).
+  - **Hierarquia Criptográfica**: `Root Offline Key` -> `PrincipalSigningCert` & `PartnerISP` -> `CollaboratorAuthCert` -> `VerificationCredential` (validade 90 dias, renovação automática aos 60 dias).
+- **E2EE Multi-Dispositivo & WebRTC Federado**:
+  - `ChaCha20-Poly1305` com `MultiDeviceEncryptedPayload`: cifra o conteúdo uma única vez com `contentKey` aleatória e encapsula a chave por dispositivo ativo do destinatário e irmãos do remetente (`X25519` + `HKDF-SHA256` `ISPCHAT-WRAP-V2:<deviceId>`).
+  - Chamadas WebRTC (`flutter_webrtc`) sinalizadas por envelopes E2EE e credenciais TURN efêmeras HMAC-SHA256 (`TurnCredentialService`).
+- **Descoberta de Rede via DoH SRV**:
+  - Cliente resolve `_ispchat._tcp.ispchat.dev.br` exclusivamente via DNS-over-HTTPS (DoH JSON e fallback RFC 8484 wireformat), priorizando `HomeNodeClaim` fixado, sementes sociais/manuais e fallback para `principal.ispchat.dev.br:443`.
 
-## 🚀 Visão Geral e Filosofia
-Em vez de todos os usuários do mundo se conectarem a um servidor central, no ISP Chat, **cada provedor de internet hospeda um nó da rede**. Os provedores se comunicam entre si através de uma rede distribuída e permissionada no nível de infraestrutura.
+## Estrutura do Repositório
 
-### 🛡️ Privacidade e Identidade Auto-Soberana
-- **Sem senhas (UUIDv7 + Criptografia):** Sua identidade é um `UUIDv7` matematicamente atrelado a Chaves Criptográficas locais.
-- **Frase Semente:** O backup da conta é feito por uma Mnemônica de 12 palavras (padrão BIP39).
-- **Sem Aliases Globais:** Para evitar spoofing (falsidade ideológica), identidades são trocadas fisicamente via QR Code ou Link Mágico.
-- **Criptografia E2E Total:** Chamadas (WebRTC) e Mensagens de Texto são 100% criptografadas de ponta a ponta. O Provedor roteia apenas lixo criptográfico.
+- [`node/ispchat-common`](node/ispchat-common): contrato Protobuf/gRPC ([`ispchat.proto`](node/ispchat-common/src/main/proto/ispchat.proto)), transcrições canônicas binárias (`CanonicalTranscripts`), validadores CPF/CNPJ alfanumérico e criptografia multi-dispositivo Java.
+- [`node/ispchat-node`](node/ispchat-node): nó de borda/home P2P (Kademlia DHT, streaming bidirecional gRPC, roteamento multi-nó, mTLS de federação, rate-limiting por tier, sync de revogações e provedor TURN HMAC).
+- [`node/ispchat-principal`](node/ispchat-principal): serviço central de governança (PostgreSQL + Flyway, ledger encadeado por hash com escrow X25519, emissão/renovação de credenciais, portabilidade de Home Node, rebind de CPF, diretório CNPJ e CLI offline de governança Root/Escrow).
+- [`node/ispchat-erp-bridge`](node/ispchat-erp-bridge): gateway REST Spring Boot para integração com ERPs de ISPs (emissão de atestações corporativas/assinantes com assinatura Ed25519 configurada pelo parceiro).
+- [`app`](app): cliente Flutter com geração oficial `protoc` ([`app/tool/generate_proto.sh`](app/tool/generate_proto.sh)), cofre seguro (`FlutterSecureStorage`), DoH SRV, WebRTC e UI responsiva mobile/desktop.
 
-### ⚔️ Resiliência Extrema e Anti-Censura
-Projetado como uma arquitetura de trincheira para sobreviver a bloqueios judiciais ou de trânsito (BGP Blackholing):
-1. **Fallback de Onboarding:** Se o provedor do usuário não possuir um nó, o App acha automaticamente o nó público mais próximo via Ping.
-2. **Hardcoded IPs e Links Sociais:** Ignora o bloqueio nacional de DNS (`ispchat.dev.br`) conectando direto nos IPs.
-3. **Domain Fronting e Rotação de IP:** Escudos contra bloqueio em massa da infraestrutura.
-4. **Modo Doomsday (Zero-Infra):** Se todos os servidores caírem, os aparelhos fecham túneis P2P diretos na internet aproveitando a ausência de NAT do **IPv6**, ou via Mesh Local (Bluetooth/Wi-Fi).
+## Comandos de Desenvolvimento & Testes
 
-## 🏗️ Arquitetura Técnica
-A stack é baseada em performance nativa e descentralização validada:
-*   **Rede DHT Kademlia:** "Diretório global" distribuído onde toda atualização exige Assinatura Digital do cliente (Anti-Spoofing).
-*   **Segurança de Infraestrutura (mTLS + CA):** Conexões gRPC entre provedores exigem um Certificado Digital assinado pela Autoridade Certificadora do ispChat, bloqueando sumariamente invasores e nós falsos.
-*   **Sinalização e Roteamento (Backend Java 25 LTS):** Microsserviços de alta concorrência com Virtual Threads e pool de canais gRPC mTLS direto na porta 443.
-*   **Estado e Mensageria (Redis):** Fila Offline (Store and Forward) e Broadcast de Toque Multi-dispositivos.
-*   **Aplicativo (Frontend Flutter):** App ultra leve que encarcera a Chave Privada do usuário.
+```bash
+# Backend Java 25 LTS (todos os módulos + cobertura JaCoCo)
+cd node && ./gradlew test jacocoTestReport build --no-daemon
 
-## 📖 Documentação Detalhada
-Consulte a pasta `/docs` para mergulhar nos pormenores técnicos da arquitetura P2P:
-- [PRD (Requisitos e User Stories)](docs/PRD_MVP.md)
-- [Tech Spec (Especificação Técnica de Redes)](docs/Tech_Spec_MVP.md)
-- [QA Plan (Testes e Qualidade)](docs/QA_Strategy_MVP.md)
+# Regenerar stubs Dart a partir de node/ispchat-common/src/main/proto/ispchat.proto
+cd app && ./tool/generate_proto.sh
 
-## ⚖️ Licença de Código Aberto
-O Frontend (App Flutter) é licenciado sob a **GPLv3**.
-O Backend (Nós Java/Redis) é estritamente licenciado sob a **AGPLv3 (Affero GPL)**. 
-A licença AGPLv3 garante que qualquer entidade (provedor) que modifique o código do servidor para uso na rede seja legalmente obrigada a publicar suas modificações de código aberto, protegendo a rede contra software espião corporativo.
+# Análise estática e suíte de testes Flutter com LCOV
+cd app && flutter analyze && flutter test --coverage
+```
 
----
-*Segurança em primeiro lugar. Inquebrável por design.*
+Consulte também:
+- [docs/PRD_MVP.md](docs/PRD_MVP.md)
+- [docs/Tech_Spec_MVP.md](docs/Tech_Spec_MVP.md)
+- [docs/QA_Strategy_MVP.md](docs/QA_Strategy_MVP.md)
+- [docs/designs/isp_governance_and_erp_gateway.md](docs/designs/isp_governance_and_erp_gateway.md)

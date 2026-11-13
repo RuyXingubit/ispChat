@@ -10,18 +10,26 @@ services:
       - ispchat-net
 
   node:
-    build: .
+    build:
+      context: .
+      dockerfile: ispchat-node/Dockerfile
     container_name: ispchat-node
     restart: always
     depends_on:
       - redis
     ports:
-      - "443:443/tcp"
+      - "443:8443/tcp"
     environment:
       - SPRING_DATA_REDIS_HOST=redis
       - SPRING_DATA_REDIS_PORT=6379
-      - GRPC_SERVER_PORT=443
-      - ISPCHAT_NODE_ID=${ISPCHAT_NODE_ID:-node1.ispchat.dev.br}
+      - ISPCHAT_GRPC_PORT=8443
+      - ISPCHAT_DHT_NODE_ID=${ISPCHAT_DHT_NODE_ID:-01950000-0000-7000-8000-000000000001}
+      - ISPCHAT_NODE_PUBLIC_ADDRESS=${ISPCHAT_NODE_PUBLIC_ADDRESS:-node1.ispchat.dev.br:443}
+      - ISPCHAT_SRV_DOMAIN=${ISPCHAT_SRV_DOMAIN:-_ispchat._tcp.ispchat.dev.br}
+      - ISPCHAT_ROOT_PUBLIC_KEY=${ISPCHAT_ROOT_PUBLIC_KEY:-}
+      - ISPCHAT_PRINCIPAL_ADDRESS=${ISPCHAT_PRINCIPAL_ADDRESS:-principal.ispchat.dev.br:443}
+      - ISPCHAT_TURN_SECRET=${TURN_STATIC_AUTH_SECRET:-change_me_in_env}
+      - ISPCHAT_TURN_URIS=${ISPCHAT_TURN_URIS:-}
       - ISPCHAT_SECURITY_CA_CERT_PATH=/certs/ca.crt
       - ISPCHAT_SECURITY_NODE_CERT_PATH=/certs/node.crt
       - ISPCHAT_SECURITY_NODE_KEY_PATH=/certs/node.key
@@ -40,7 +48,7 @@ services:
       - "3478:3478/udp"
       - "5349:5349/tcp"
       - "5349:5349/udp"
-      - "49152-49252:49152-49252/udp"
+      - "49152-50152:49152-50152/udp"
     command:
       - "-c"
       - "/etc/coturn/turnserver.conf"

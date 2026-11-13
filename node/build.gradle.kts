@@ -1,64 +1,44 @@
 plugins {
-	java
-	id("org.springframework.boot") version "3.5.0"
-	id("io.spring.dependency-management") version "1.1.7"
-	id("com.google.protobuf") version "0.9.5"
+    java
+    jacoco
+    id("org.springframework.boot") version "3.5.0" apply false
+    id("io.spring.dependency-management") version "1.1.7" apply false
+    id("com.google.protobuf") version "0.9.5" apply false
 }
 
-group = "br.dev.ispchat"
-version = "0.0.1-SNAPSHOT"
+allprojects {
+    group = "br.dev.ispchat"
+    version = "0.0.1-SNAPSHOT"
 
-java {
-	toolchain {
-		languageVersion = JavaLanguageVersion.of(25)
-	}
+    repositories {
+        mavenCentral()
+    }
 }
 
-repositories {
-	mavenCentral()
-}
+subprojects {
+    apply(plugin = "java")
+    apply(plugin = "jacoco")
 
-val grpcVersion = "1.71.0"
-val protobufVersion = "4.30.2"
-val uuidCreatorVersion = "6.0.0"
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(25)
+        }
+    }
 
-dependencies {
-	implementation("org.springframework.boot:spring-boot-starter")
-	implementation("org.springframework.boot:spring-boot-starter-data-redis")
+    jacoco {
+        toolVersion = "0.8.13"
+    }
 
-	// UUIDv7 (RFC 9562)
-	implementation("com.github.f4b6a3:uuid-creator:${uuidCreatorVersion}")
+    tasks.withType<Test> {
+        useJUnitPlatform()
+        finalizedBy(tasks.named("jacocoTestReport"))
+    }
 
-	// gRPC & Protobuf
-	implementation("com.google.protobuf:protobuf-java:${protobufVersion}")
-	implementation("io.grpc:grpc-netty-shaded:${grpcVersion}")
-	implementation("io.grpc:grpc-protobuf:${grpcVersion}")
-	implementation("io.grpc:grpc-stub:${grpcVersion}")
-	compileOnly("javax.annotation:javax.annotation-api:1.3.2")
-
-	testImplementation("org.springframework.boot:spring-boot-starter-test")
-	testImplementation("io.grpc:grpc-testing:${grpcVersion}")
-	testRuntimeOnly("org.junit.platform:junit-platform-launcher")
-}
-
-protobuf {
-	protoc {
-		artifact = "com.google.protobuf:protoc:${protobufVersion}"
-	}
-	plugins {
-		create("grpc") {
-			artifact = "io.grpc:protoc-gen-grpc-java:${grpcVersion}"
-		}
-	}
-	generateProtoTasks {
-		all().forEach {
-			it.plugins {
-				create("grpc")
-			}
-		}
-	}
-}
-
-tasks.withType<Test> {
-	useJUnitPlatform()
+    tasks.withType<JacocoReport> {
+        dependsOn(tasks.named("test"))
+        reports {
+            xml.required.set(true)
+            html.required.set(true)
+        }
+    }
 }
